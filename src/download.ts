@@ -1,0 +1,95 @@
+import { $ } from "bun";
+import path from "path";
+import { mkdir } from "node:fs/promises";
+
+const DOWNLOADS_DIR = path.resolve(import.meta.dir, "..", "downloads");
+
+function sanitizeFilename(name: string): string {
+  return name
+    .replace(/[<>:"/\\|?*]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+}
+
+interface DownloadResult {
+  id: string;
+  title: string;
+  directory: string;
+  videoFile: string;
+  subtitleFile: string | null;
+}
+
+async function download(url: string): Promise<DownloadResult> {
+  console.log(`\nПолучаем метаданные: ${url}`);
+  const metaRaw = await $`yt-dlp --dump-json --no-download ${url}`.text();
+  const meta = JSON.parse(metaRaw);
+
+  const title = sanitizeFilename(meta.title);
+  const videoDir = path.join(DOWNLOADS_DIR, title);
+  await mkdir(videoDir, { recursive: true });
+
+  console.log(`Название: ${meta.title}`);
+  console.log(`Папка: ${videoDir}`);
+
+  const outputTemplate = path.join(videoDir, `${title}.%(ext)s`);
+
+  console.log(`\nСкачиваем видео в максимальном качестве...`);
+  const proc = Bun.spawn(
+    [
+      "yt-dlp",
+      "-f", "bestvideo+bestaudio/best",
+      "--merge-output-format", "mp4",
+      "-o", outputTemplate,
+      "--no-playlist",
+      "--retries", "3",
+      "--fragment-retries", "3",
+      "--write-subs",
+      "--write-auto-subs",
+      "--sub-langs", "en",
+      "--sub-format", "srt",
+      "--convert-subs", "srt",
+      url,
+    ],
+    { stdout: "inherit", stderr: "inherit" }
+  );
+
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(`yt-dlp exited with code ${exitCode}`);
+  }
+
+  const videoFile = path.join(videoDir, `${title}.mp4`);
+  if (!(await Bun.file(videoFile).exists())) {
+    throw new Error(`Видеофайл не найден: ${videoFile}`);
+  }
+
+  const srtFile = path.join(videoDir, `${title}.en.srt`);
+  const subtitleFile = (await Bun.file(srtFile).exists()) ? srtFile : null;
+
+  console.log(`\nГотово!`);
+  console.log(`  Видео:    ${videoFile}`);
+  console.log(`  Субтитры: ${subtitleFile ?? "не найдены"}`);
+
+  return {
+    id: meta.id,
+    title: meta.title,
+    directory: videoDir,
+    videoFile,
+    subtitleFile,
+  };
+}
+
+const url = process.argv[2];
+if (!url) {
+  console.error("Использование: bun run download <youtube-url>");
+  console.error("Пример:        bun run download https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  process.exit(1);
+}
+
+try {
+  await download(url);
+} catch (err) {
+  console.error("\nОшибка:", err instanceof Error ? err.message : err);
+  process.exit(1);
+}

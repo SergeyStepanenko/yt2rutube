@@ -1,0 +1,25 @@
+{
+  "name": "yt2rutube",
+  "module": "src/server.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun --hot src/server.ts",
+    "start": "bun run src/server.ts",
+    "download": "bun run src/download.ts",
+    "upload": "bun run src/upload.ts",
+    "monitoring": "docker compose up -d"
+  },
+  "dependencies": {
+    "react": "^19",
+    "react-dom": "^19"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19",
+    "@types/react-dom": "^19"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

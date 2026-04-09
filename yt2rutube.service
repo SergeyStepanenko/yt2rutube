@@ -1,0 +1,15 @@
+[Unit]
+Description=yt2rutube — YouTube to Rutube automation
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/yt2rutube
+ExecStart=/root/.bun/bin/bun run src/server.ts
+Restart=always
+RestartSec=10
+Environment=PATH=/root/.bun/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,57 @@
+# dependencies
+node_modules
+
+# output
+out
+dist
+*.tgz
+
+# code coverage
+coverage
+*.lcov
+
+# logs
+logs
+*.log
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# IntelliJ based IDEs
+.idea
+
+# Finder (MacOS) folder config
+.DS_Store
+
+# database
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# downloads & media
+downloads/
+test_dub/
+*.mp4
+*.webm
+*.mkv
+*.wav
+*.mp3
+*.png
+*.jpg
+*.jpeg
+
+# python venv
+.venv/
+
+# channel assets (binary images)
+channel-assets/

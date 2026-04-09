@@ -1,0 +1,8 @@
+node_modules
+downloads
+data
+*.sqlite
+*.db
+.git
+grafana-data
+prometheus-data

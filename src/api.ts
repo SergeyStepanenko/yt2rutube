@@ -1,0 +1,217 @@
+import type { DB } from "./db";
+import type { Logger } from "./logger";
+import type { Worker } from "./worker";
+import { generatePrometheusMetrics } from "./metrics";
+import { fetchVideoInfo, fetchChannelVideos } from "./sources";
+
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
+function cors(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    },
+  });
+}
+
+export function createApiServer(db: DB, log: Logger, worker: Worker) {
+  return {
+    async fetch(req: Request): Promise<Response> {
+      const url = new URL(req.url);
+      const method = req.method;
+      const pathname = url.pathname;
+
+      if (method === "OPTIONS") return cors();
+
+      // --- Metrics ---
+      if (pathname === "/metrics") {
+        return new Response(generatePrometheusMetrics(db), {
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        });
+      }
+
+      // --- API Routes ---
+
+      // Stats overview
+      if (pathname === "/api/stats" && method === "GET") {
+        const stats = db.getStats();
+        const sources = db.getSources();
+        return json({
+          stats,
+          sourcesCount: sources.length,
+          lastCycleAt: worker.lastCycleAt?.toISOString() ?? null,
+          isProcessing: worker.isProcessing,
+          currentVideoId: worker.currentVideoId,
+          currentPhase: worker.currentPhase,
+        });
+      }
+
+      // Sources
+      if (pathname === "/api/sources" && method === "GET") {
+        return json(db.getAllSources());
+      }
+
+      if (pathname === "/api/sources" && method === "POST") {
+        const body = (await req.json()) as {
+          type: string;
+          url: string;
+          name?: string;
+        };
+        if (!body.type || !body.url) {
+          return json({ error: "type and url required" }, 400);
+        }
+        const source = db.addSource(body.type, body.url, body.name);
+        log.info(`Добавлен источник: ${body.url}`);
+        return json(source, 201);
+      }
+
+      const sourceMatch = pathname.match(/^\/api\/sources\/(\d+)$/);
+      if (sourceMatch && method === "DELETE") {
+        const id = Number(sourceMatch[1]);
+        db.deleteSource(id);
+        log.info(`Удалён источник #${id}`);
+        return json({ ok: true });
+      }
+
+      // Videos
+      if (pathname === "/api/videos" && method === "GET") {
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        const limit = Number(url.searchParams.get("limit") ?? 50);
+        const status = url.searchParams.get("status") ?? undefined;
+        const sourceId = url.searchParams.get("source_id")
+          ? Number(url.searchParams.get("source_id"))
+          : undefined;
+        const result = db.getAllVideos(offset, limit, status, sourceId);
+        return json(result);
+      }
+
+      // Add single video URL
+      if (pathname === "/api/videos" && method === "POST") {
+        const body = (await req.json()) as { url: string };
+        if (!body.url) return json({ error: "url required" }, 400);
+
+        try {
+          const info = await fetchVideoInfo(body.url);
+          const row = db.addVideo(
+            info.youtubeId,
+            info.youtubeUrl,
+            info.title,
+            info.duration,
+            info.width > info.height
+          );
+          if (!row) {
+            return json({ error: "Video already exists" }, 409);
+          }
+          log.info(`Видео добавлено вручную: ${info.title}`);
+          return json(row, 201);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return json({ error: msg }, 400);
+        }
+      }
+
+      // Add channel — fetch all horizontal videos
+      if (pathname === "/api/channels" && method === "POST") {
+        const body = (await req.json()) as { url: string; name?: string };
+        if (!body.url) return json({ error: "url required" }, 400);
+
+        const source = db.addSource("channel", body.url, body.name);
+        log.info(`Канал добавлен: ${body.url}`);
+
+        // Async discovery — don't block the response
+        (async () => {
+          try {
+            const videos = await fetchChannelVideos(body.url);
+            let added = 0;
+            for (const v of videos) {
+              if (v.width > 0 && v.height > 0 && v.width <= v.height) continue;
+              const row = db.addVideo(
+                v.youtubeId,
+                v.youtubeUrl,
+                v.title,
+                v.duration,
+                true,
+                source.id
+              );
+              if (row) added++;
+            }
+            log.info(
+              `Канал ${body.name ?? body.url}: найдено ${videos.length} видео, добавлено ${added}`
+            );
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            log.error(`Ошибка загрузки канала ${body.url}: ${msg}`);
+          }
+        })();
+
+        return json({ source, message: "Channel added, videos being discovered in background" }, 202);
+      }
+
+      const videoMatch = pathname.match(/^\/api\/videos\/(\d+)$/);
+      if (videoMatch && method === "DELETE") {
+        const id = Number(videoMatch[1]);
+        db.deleteVideo(id);
+        return json({ ok: true });
+      }
+
+      if (videoMatch && method === "PATCH") {
+        const id = Number(videoMatch[1]);
+        const body = (await req.json()) as { action: string };
+        if (body.action === "reset") {
+          db.resetVideo(id);
+          log.info(`Видео #${id} сброшено в pending`);
+          return json({ ok: true });
+        }
+        if (body.action === "skip") {
+          db.updateVideoStatus(id, "skipped");
+          return json({ ok: true });
+        }
+        return json({ error: "Unknown action" }, 400);
+      }
+
+      // Logs
+      if (pathname === "/api/logs" && method === "GET") {
+        const limit = Number(url.searchParams.get("limit") ?? 100);
+        return json(db.getRecentLogs(limit));
+      }
+
+      // Trigger manual cycle
+      if (pathname === "/api/sync" && method === "POST") {
+        if (worker.isProcessing) {
+          return json({ error: "Sync already in progress" }, 409);
+        }
+        worker.runCycle().catch((e) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          log.error(`Manual sync failed: ${msg}`);
+        });
+        return json({ message: "Sync started" }, 202);
+      }
+
+      // Worker status
+      if (pathname === "/api/worker" && method === "GET") {
+        return json({
+          isProcessing: worker.isProcessing,
+          lastCycleAt: worker.lastCycleAt?.toISOString() ?? null,
+        });
+      }
+
+      // Serve admin frontend for any non-API path
+      if (!pathname.startsWith("/api") && pathname !== "/metrics") {
+        return new Response(null, { status: 404 });
+      }
+
+      return json({ error: "Not found" }, 404);
+    },
+  };
+}
