@@ -122,19 +122,33 @@ def merge_overlapping(entries: list[dict], max_duration_ms: int = 8000) -> list[
         seen_text.add(e["text"])
         deduped.append(e)
 
-    # Merge adjacent
+    # Merge adjacent / overlapping segments
     merged = []
     cur = {**deduped[0]}
     for e in deduped[1:]:
         gap = e["start"] - cur["end"]
         combined_dur = e["end"] - cur["start"]
-        if gap < 1500 and combined_dur <= max_duration_ms:
+        if (gap < 1500 or gap < 0) and combined_dur <= max_duration_ms:
             cur["end"] = max(cur["end"], e["end"])
             cur["text"] += " " + e["text"]
         else:
             merged.append(cur)
             cur = {**e}
     merged.append(cur)
+
+    # Fix overlapping timings: each segment must start after previous ends
+    for i in range(1, len(merged)):
+        if merged[i]["start"] < merged[i - 1]["end"]:
+            merged[i]["start"] = merged[i - 1]["end"]
+        if merged[i]["start"] >= merged[i]["end"]:
+            merged[i]["end"] = merged[i]["start"] + 500
+
+    # Ensure minimum gap between segments so TTS doesn't collide
+    MIN_GAP_MS = 80
+    for i in range(1, len(merged)):
+        gap = merged[i]["start"] - merged[i - 1]["end"]
+        if 0 <= gap < MIN_GAP_MS:
+            merged[i]["start"] = merged[i - 1]["end"] + MIN_GAP_MS
 
     # Remove internal repetitions and clean up
     result = []
@@ -172,6 +186,10 @@ def _call_translate(texts: list[str]) -> list[str]:
         "as if you are commentating live on TV.\n\n"
         "Rules:\n"
         "- Translate naturally, not literally. Adapt to Russian style.\n"
+        "- CRITICAL: Keep translations CONCISE. Russian text will be spoken by TTS "
+        "and must fit into the same time slot as the English original. "
+        "Prefer shorter phrasings. Omit filler words. "
+        "The translated text should ideally be similar length or shorter than the English.\n"
         "- Keep proper names (people, places, brands) in original.\n"
         "- Use correct sport terminology.\n"
         '- "metal" in auto-captions means "medal" (медаль).\n'
@@ -250,7 +268,7 @@ async def synthesize_segments(segments: list[dict], output_dir: Path) -> list[di
             continue
         out_path = output_dir / f"seg_{i:04d}.mp3"
         try:
-            comm = edge_tts.Communicate(text_ru, VOICE, rate="+10%")
+            comm = edge_tts.Communicate(text_ru, VOICE, rate="+20%")
             await comm.save(str(out_path))
             results.append({**seg, "audio_path": str(out_path)})
         except Exception as e:
@@ -272,31 +290,64 @@ def get_duration_ms(path: str) -> int:
     return int(float(r.stdout.strip()) * 1000)
 
 
+def _atempo_chain(speed: float) -> str:
+    """Build chained atempo filters for speeds > 2.0x (ffmpeg limit per filter is 0.5–2.0)."""
+    parts = []
+    while speed > 2.0:
+        parts.append("atempo=2.0")
+        speed /= 2.0
+    if speed > 1.001:
+        parts.append(f"atempo={speed:.3f}")
+    return ",".join(parts) if parts else ""
+
+
 def build_final_audio(segments: list[dict], bg_path: str, out_path: str):
     bg_dur = get_duration_ms(bg_path)
     print(f"  Background: {bg_dur / 1000:.1f}s, segments: {len(segments)}")
 
+    MAX_SPEED = 2.5
+
     filter_parts = []
     inputs = ["-i", bg_path]
 
+    placed = []
     for i, seg in enumerate(segments):
-        inputs.extend(["-i", seg["audio_path"]])
         seg_dur = get_duration_ms(seg["audio_path"])
         available = seg["end"] - seg["start"]
-        if seg_dur > available + 500:
-            speed = min(seg_dur / available, 1.5)
-            filter_parts.append(
-                f"[{i+1}:a]atempo={speed:.2f},adelay={seg['start']}|{seg['start']}[s{i}]"
-            )
-        else:
-            filter_parts.append(
-                f"[{i+1}:a]adelay={seg['start']}|{seg['start']}[s{i}]"
-            )
 
-    mix_inputs = "[0:a]" + "".join(f"[s{i}]" for i in range(len(segments)))
+        # Determine where this segment actually starts (its offset)
+        offset = seg["start"]
+
+        filters = []
+
+        if seg_dur > available + 200:
+            speed = seg_dur / available
+            if speed > MAX_SPEED:
+                # Speed-up to MAX_SPEED, then hard-trim to fit the slot
+                chain = _atempo_chain(MAX_SPEED)
+                if chain:
+                    filters.append(chain)
+                trimmed_dur_s = available / 1000
+                filters.append(f"atrim=0:{trimmed_dur_s:.3f}")
+            else:
+                chain = _atempo_chain(speed)
+                if chain:
+                    filters.append(chain)
+
+        # Ensure segment doesn't bleed into the next one by trimming to slot
+        slot_s = available / 1000
+        filters.append(f"atrim=0:{slot_s:.3f}")
+        filters.append(f"adelay={offset}|{offset}")
+
+        filter_str = f"[{i+1}:a]" + ",".join(filters) + f"[s{i}]"
+        filter_parts.append(filter_str)
+        inputs.extend(["-i", seg["audio_path"]])
+        placed.append(i)
+
+    mix_inputs = "[0:a]" + "".join(f"[s{i}]" for i in placed)
     filter_parts.append(
-        f"{mix_inputs}amix=inputs={len(segments)+1}:duration=first:dropout_transition=0,"
-        f"volume={len(segments)+1}[out]"
+        f"{mix_inputs}amix=inputs={len(placed)+1}:duration=first:dropout_transition=0,"
+        f"volume={len(placed)+1}[out]"
     )
 
     cmd = [
@@ -307,7 +358,7 @@ def build_final_audio(segments: list[dict], bg_path: str, out_path: str):
     print("  Mixing...")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        print("FFmpeg error:", r.stderr[-500:])
+        print("FFmpeg error:", r.stderr[-1000:])
         raise RuntimeError("FFmpeg mixing failed")
 
 
