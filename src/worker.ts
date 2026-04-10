@@ -506,6 +506,12 @@ export class Worker {
       case "punctuate_cached":
         this.log.info(`Кеш: ${ev.segments ?? ev.chars ?? ""}`, videoId);
         break;
+      case "tts_shortened":
+        this.log.info(
+          `Перефразировано ${ev.count}/${ev.total} сегментов (были слишком длинные)`,
+          videoId
+        );
+        break;
       case "error":
         this.log.error(`[dub] ${ev.message}`, videoId);
         break;

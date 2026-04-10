@@ -133,7 +133,7 @@ export async function uploadToRutube(
       title,
       description: options.description ?? "",
       isHidden: options.isHidden ?? false,
-      categoryId: options.categoryId ?? 13,
+      categoryId: options.categoryId ?? 2,
     });
 
     const videoId = upload.videoId;

@@ -74,7 +74,7 @@ export class RutubeClient {
         title: params.title?.slice(0, 100),
         description: (params.description ?? "").slice(0, 5000),
         is_hidden: params.isHidden ?? false,
-        category_id: params.categoryId ?? 13,
+        category_id: params.categoryId ?? 2,
       });
     }
 

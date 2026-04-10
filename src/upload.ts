@@ -87,7 +87,7 @@ try {
     title: title.slice(0, 100),
     description: "",
     isHidden: false,
-    categoryId: 13,
+    categoryId: 2,
   });
 
   console.log(`\n       Видео отправлено!`);

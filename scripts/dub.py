@@ -364,24 +364,76 @@ def translate_segments(segments: list[dict], batch_size: int = 25) -> list[dict]
 
 # ── TTS ──────────────────────────────────────────────────────
 
-async def synthesize_segments(segments: list[dict], output_dir: Path) -> list[dict]:
+
+def _shorten_text(text_ru: str, target_words: int, original_en: str) -> str:
+    """Ask DeepSeek to rephrase Russian text to be shorter."""
+    system = (
+        "Ты — редактор русских субтитров. Тебе дан перевод фразы, "
+        "который слишком длинный для озвучки. Перефразируй его КОРОЧЕ — "
+        f"максимум {target_words} слов. Сохрани смысл и энергию. "
+        "Не добавляй ничего нового. Верни ТОЛЬКО сокращённый текст, без кавычек."
+    )
+    user = f"Английский оригинал: {original_en}\nТекущий перевод: {text_ru}"
+    return _call_deepseek(system, user, temperature=0.4).strip().strip('"')
+
+
+async def _tts_one(text: str, out_path: Path):
+    """Synthesize one TTS segment."""
     import edge_tts
+    comm = edge_tts.Communicate(text, VOICE, rate="+20%")
+    await comm.save(str(out_path))
+
+
+async def synthesize_segments(segments: list[dict], output_dir: Path) -> list[dict]:
     output_dir.mkdir(parents=True, exist_ok=True)
     results = []
+    shortened = 0
+    MAX_RETRIES = 2
+    OVERFLOW_THRESHOLD = 1.3  # TTS > 130% of slot → rephrase
+
     for i, seg in enumerate(segments):
         text_ru = seg.get("text_ru", "").strip()
         if not text_ru:
             continue
+
+        available = seg["end"] - seg["start"]
         out_path = output_dir / f"seg_{i:04d}.mp3"
-        try:
-            comm = edge_tts.Communicate(text_ru, VOICE, rate="+20%")
-            await comm.save(str(out_path))
-            results.append({**seg, "audio_path": str(out_path)})
-        except Exception as e:
-            print(f"\n  TTS error seg {i}: {e}")
+        current_text = text_ru
+
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                await _tts_one(current_text, out_path)
+            except Exception as e:
+                print(f"\n  TTS error seg {i}: {e}")
+                break
+
+            tts_dur = get_duration_ms(str(out_path))
+
+            if available > 0 and tts_dur > available * OVERFLOW_THRESHOLD and attempt < MAX_RETRIES:
+                # TTS is too long — ask DeepSeek to shorten
+                ratio = tts_dur / available
+                current_words = len(current_text.split())
+                target_words = max(3, int(current_words / ratio * 0.9))
+                try:
+                    new_text = _shorten_text(
+                        current_text, target_words, seg.get("text", "")
+                    )
+                    if new_text and len(new_text.split()) < current_words:
+                        current_text = new_text
+                        shortened += 1
+                        continue
+                except Exception:
+                    pass
+
+            break
+
+        results.append({**seg, "text_ru": current_text, "audio_path": str(out_path)})
         sys.stdout.write(f"\r  TTS: {i + 1}/{len(segments)}")
         sys.stdout.flush()
+
     print()
+    if shortened:
+        emit("tts_shortened", count=shortened, total=len(segments))
     return results
 
 
@@ -606,12 +658,22 @@ async def main():
         for i, s in enumerate(segments, 1):
             f.write(f"{i}\n{ms_to_ts(s['start'])} --> {ms_to_ts(s['end'])}\n{s.get('text_ru', '')}\n\n")
 
-    # Step 5: TTS synthesis
+    # Step 5: TTS synthesis (with auto-shortening of overlong translations)
     tts_dir = folder / "tts_segments"
     dubbed_path = folder / "dubbed_audio.wav"
     emit("step", step=5, name="tts_synthesize")
     segments = await synthesize_segments(segments, tts_dir)
     emit("step_done", step=5, audio_segments=len(segments))
+
+    # Update cache with any shortened text_ru
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(
+            [
+                {k: v for k, v in s.items() if k != "audio_path"}
+                for s in segments
+            ],
+            f, ensure_ascii=False, indent=2,
+        )
 
     # Step 6: Mix audio + encode final video
     emit("step", step=6, name="mix_and_encode")
