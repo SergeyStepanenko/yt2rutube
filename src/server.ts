@@ -17,6 +17,8 @@ if (recovered > 0) {
 const worker = new Worker(db, log);
 const api = createApiServer(db, log, worker);
 
+const ADMIN_DIR = path.resolve(import.meta.dir, "../admin");
+
 const server = Bun.serve({
   port: config.adminPort,
   routes: {
@@ -30,6 +32,15 @@ const server = Bun.serve({
       url.pathname === "/metrics"
     ) {
       return api.fetch(req);
+    }
+
+    const staticExts = [".ico", ".png", ".svg", ".webmanifest"];
+    if (staticExts.some((ext) => url.pathname.endsWith(ext))) {
+      const filePath = path.join(ADMIN_DIR, path.basename(url.pathname));
+      const file = Bun.file(filePath);
+      if (await file.exists()) {
+        return new Response(file);
+      }
     }
 
     return new Response("Not found", { status: 404 });

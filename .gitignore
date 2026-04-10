@@ -49,9 +49,16 @@ test_dub/
 *.png
 *.jpg
 *.jpeg
+*.ico
+
+# allow favicon/icons in admin
+!admin/favicon*.png
+!admin/favicon.ico
+!admin/apple-touch-icon.png
 
 # python venv
 .venv/
 
 # channel assets (binary images)
 channel-assets/
+__pycache__/
