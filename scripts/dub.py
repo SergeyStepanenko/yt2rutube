@@ -76,89 +76,226 @@ def ms_to_ts(ms: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _dedup_within_text(text: str) -> str:
-    """Remove repeated phrases that YouTube auto-captions produce within a single block."""
-    words = text.split()
-    if len(words) < 6:
-        return text
-    # Try progressively shorter phrase lengths to find and remove repeats
-    result_words = list(words)
-    for phrase_len in range(len(words) // 2, 2, -1):
-        i = 0
-        cleaned = []
-        while i < len(result_words):
-            phrase = result_words[i : i + phrase_len]
-            next_phrase = result_words[i + phrase_len : i + phrase_len * 2]
-            if phrase == next_phrase:
-                i += phrase_len  # skip the duplicate
-            else:
-                cleaned.append(result_words[i])
-                i += 1
-        result_words = cleaned
-    return " ".join(result_words)
+# ── Subtitle preprocessing ────────────────────────────────────
 
 
-def merge_overlapping(entries: list[dict], max_duration_ms: int = 8000) -> list[dict]:
+def _dedup_overlap(prev_words: list[str], next_words: list[str]) -> list[str]:
+    """Find overlapping suffix of prev_words with prefix of next_words.
+    Return only the unique (non-overlapping) tail of next_words."""
+    best = 0
+    for olen in range(1, min(len(prev_words), len(next_words)) + 1):
+        if prev_words[-olen:] == next_words[:olen]:
+            best = olen
+    return next_words[best:]
+
+
+def flatten_srt(entries: list[dict]) -> list[dict]:
+    """Flatten raw SRT entries into a continuous word stream with per-word timing.
+
+    YouTube auto-captions overlap: tail of segment N = head of segment N+1.
+    We deduplicate and build a list of {word, start_ms, end_ms} for every unique word.
+    """
     if not entries:
         return []
 
-    # Clean each entry
+    # Clean
     cleaned = []
     for e in entries:
         text = re.sub(r">>\s*", "", e["text"])
         text = re.sub(r"\[.*?\]", "", text).strip()
+        text = re.sub(r"\s+", " ", text).strip()
         if text:
             cleaned.append({**e, "text": text})
 
     if not cleaned:
         return []
 
-    # Deduplicate identical entries
-    deduped = []
-    seen_text = set()
-    for e in cleaned:
-        if e["text"] in seen_text:
+    # Build continuous word list by deduplicating overlapping tails/heads.
+    all_words: list[str] = cleaned[0]["text"].split()
+    # Per-word timing: interpolate within each segment
+    word_times: list[dict] = []
+
+    def _add_word_times(words: list[str], start_ms: int, end_ms: int):
+        n = len(words)
+        if n == 0:
+            return
+        dur = end_ms - start_ms
+        for j, w in enumerate(words):
+            ws = start_ms + int(dur * j / n)
+            we = start_ms + int(dur * (j + 1) / n)
+            word_times.append({"word": w, "start": ws, "end": we})
+
+    _add_word_times(all_words, cleaned[0]["start"], cleaned[0]["end"])
+
+    for e in cleaned[1:]:
+        next_words = e["text"].split()
+        unique = _dedup_overlap(all_words[-20:], next_words)
+        if unique:
+            all_words.extend(unique)
+            n_total = len(next_words)
+            n_unique = len(unique)
+            overlap_count = n_total - n_unique
+            dur = e["end"] - e["start"]
+            unique_start = e["start"] + int(dur * overlap_count / n_total) if n_total > 0 else e["start"]
+            _add_word_times(unique, unique_start, e["end"])
+
+    return word_times
+
+
+def _call_deepseek(system: str, user: str, temperature: float = 0.3) -> str:
+    """Generic DeepSeek API call with retry."""
+    import time
+
+    payload = json.dumps({
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": temperature,
+    }).encode()
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+    }
+
+    for attempt in range(5):
+        try:
+            req = urllib.request.Request(DEEPSEEK_URL, data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read())
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503) and attempt < 4:
+                wait = (attempt + 1) * 5
+                emit("api_retry", code=e.code, wait=wait, attempt=attempt + 1)
+                time.sleep(wait)
+            else:
+                raise
+
+    raw = data["choices"][0]["message"]["content"].strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```\w*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw)
+    return raw
+
+
+def add_punctuation(text: str, batch_size: int = 800) -> str:
+    """Send raw text to DeepSeek to add punctuation. Process in batches by word count."""
+    words = text.split()
+    if not words:
+        return text
+
+    system = (
+        "You are a punctuation restoration model. "
+        "The user gives you English text from auto-generated speech-to-text captions "
+        "with NO punctuation. Your task:\n"
+        "1. Add proper punctuation: periods, commas, question marks, exclamation marks.\n"
+        "2. Fix obvious capitalization (start of sentences).\n"
+        "3. DO NOT change, remove, add, or reorder any words. "
+        "The word count and order must remain EXACTLY the same.\n"
+        "4. Return ONLY the punctuated text, nothing else.\n"
+    )
+    if _video_context:
+        system += f"\nContext (for understanding domain terms):\n{_video_context}\n"
+
+    result_parts = []
+    for i in range(0, len(words), batch_size):
+        batch = " ".join(words[i : i + batch_size])
+        batch_num = i // batch_size + 1
+        total_batches = (len(words) + batch_size - 1) // batch_size
+        emit("punctuate_batch", batch=batch_num, total=total_batches)
+        punctuated = _call_deepseek(system, batch)
+        result_parts.append(punctuated.strip())
+
+    return " ".join(result_parts)
+
+
+def split_into_segments(punctuated_text: str, word_times: list[dict]) -> list[dict]:
+    """Split punctuated text into sentence-based segments with timings from word_times."""
+    # Split on sentence boundaries
+    raw_sentences = re.split(r'(?<=[.!?])\s+', punctuated_text.strip())
+
+    # Merge very short fragments (< 3 words) into the previous sentence,
+    # and split overly long sentences at commas.
+    MAX_WORDS = 25
+    sentences: list[str] = []
+    for s in raw_sentences:
+        s = s.strip()
+        if not s:
             continue
-        seen_text.add(e["text"])
-        deduped.append(e)
-
-    # Merge adjacent / overlapping segments
-    merged = []
-    cur = {**deduped[0]}
-    for e in deduped[1:]:
-        gap = e["start"] - cur["end"]
-        combined_dur = e["end"] - cur["start"]
-        if (gap < 1500 or gap < 0) and combined_dur <= max_duration_ms:
-            cur["end"] = max(cur["end"], e["end"])
-            cur["text"] += " " + e["text"]
+        if sentences and len(s.split()) < 3:
+            sentences[-1] += " " + s
         else:
-            merged.append(cur)
-            cur = {**e}
-    merged.append(cur)
+            sentences.append(s)
 
-    # Fix overlapping timings: each segment must start after previous ends
-    for i in range(1, len(merged)):
-        if merged[i]["start"] < merged[i - 1]["end"]:
-            merged[i]["start"] = merged[i - 1]["end"]
-        if merged[i]["start"] >= merged[i]["end"]:
-            merged[i]["end"] = merged[i]["start"] + 500
+    # Split long sentences at commas
+    final: list[str] = []
+    for s in sentences:
+        words = s.split()
+        if len(words) <= MAX_WORDS:
+            final.append(s)
+            continue
+        # Split on commas
+        parts = re.split(r',\s*', s)
+        buf = ""
+        for p in parts:
+            candidate = (buf + ", " + p).strip(", ") if buf else p
+            if len(candidate.split()) > MAX_WORDS and buf:
+                final.append(buf.rstrip(",") + ",")
+                buf = p
+            else:
+                buf = candidate
+        if buf:
+            final.append(buf)
+    sentences = [s for s in final if len(s.split()) >= 2]
 
-    # Ensure minimum gap between segments so TTS doesn't collide
-    MIN_GAP_MS = 80
-    for i in range(1, len(merged)):
-        gap = merged[i]["start"] - merged[i - 1]["end"]
-        if 0 <= gap < MIN_GAP_MS:
-            merged[i]["start"] = merged[i - 1]["end"] + MIN_GAP_MS
+    if not sentences:
+        return []
 
-    # Remove internal repetitions and clean up
-    result = []
-    for seg in merged:
-        text = _dedup_within_text(seg["text"])
-        text = re.sub(r"\s+", " ", text).strip()
-        if len(text) > 2:
-            seg["text"] = text
-            result.append(seg)
-    return result
+    # Map sentences to word_times.
+    # word_times has one entry per word; sentences split the same words.
+    segments = []
+    wi = 0  # current position in word_times
+    MIN_GAP_MS = 100
+
+    for sent in sentences:
+        sent_words = sent.split()
+        n = len(sent_words)
+        if n == 0:
+            continue
+
+        # Consume n words from word_times
+        if wi >= len(word_times):
+            break
+
+        start_idx = wi
+        end_idx = min(wi + n - 1, len(word_times) - 1)
+
+        seg_start = word_times[start_idx]["start"]
+        seg_end = word_times[end_idx]["end"]
+
+        # Enforce minimum duration
+        if seg_end - seg_start < 300:
+            seg_end = seg_start + max(300, n * 150)
+
+        segments.append({
+            "start": seg_start,
+            "end": seg_end,
+            "text": sent,
+        })
+
+        wi += n
+
+    # Enforce non-overlapping with minimum gap
+    for i in range(1, len(segments)):
+        if segments[i]["start"] < segments[i - 1]["end"] + MIN_GAP_MS:
+            segments[i]["start"] = segments[i - 1]["end"] + MIN_GAP_MS
+        if segments[i]["start"] >= segments[i]["end"]:
+            segments[i]["end"] = segments[i]["start"] + 500
+
+    return segments
 
 
 # ── Translation (DeepSeek) ────────────────────────────────────
@@ -177,7 +314,8 @@ def set_video_context(title: str = "", description: str = ""):
     _video_context = "\n".join(parts)
 
 
-def _call_translate(texts: list[str]) -> list[str]:
+def translate_segments(segments: list[dict], batch_size: int = 25) -> list[dict]:
+    """Translate punctuated English sentences to Russian via DeepSeek."""
     import time
 
     system_prompt = (
@@ -186,13 +324,11 @@ def _call_translate(texts: list[str]) -> list[str]:
         "as if you are commentating live on TV.\n\n"
         "Rules:\n"
         "- Translate naturally, not literally. Adapt to Russian style.\n"
-        "- CRITICAL: Keep translations CONCISE. Russian text will be spoken by TTS "
-        "and must fit into the same time slot as the English original. "
-        "Prefer shorter phrasings. Omit filler words. "
-        "The translated text should ideally be similar length or shorter than the English.\n"
+        "- CRITICAL: Keep translations CONCISE. Russian text will be spoken aloud by TTS "
+        "and must fit roughly the same time slot as English. "
+        "Prefer shorter phrasings. Omit filler words.\n"
         "- Keep proper names (people, places, brands) in original.\n"
         "- Use correct sport terminology.\n"
-        '- "metal" in auto-captions means "medal" (медаль).\n'
         "- Keep the energy and excitement of live commentary.\n"
         "- Return ONLY a JSON array of translated strings, same order, same count.\n"
         "- No markdown, no explanation.\n"
@@ -200,59 +336,29 @@ def _call_translate(texts: list[str]) -> list[str]:
     if _video_context:
         system_prompt += f"\nVideo context:\n{_video_context}\n"
 
-    payload = json.dumps({
-        "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(texts, ensure_ascii=False)},
-        ],
-        "temperature": 0.3,
-    }).encode()
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-    }
-
-    for attempt in range(5):
-        try:
-            req = urllib.request.Request(DEEPSEEK_URL, data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.loads(resp.read())
-            break
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 502, 503) and attempt < 4:
-                wait = (attempt + 1) * 5
-                emit("translate_retry", code=e.code, wait=wait, attempt=attempt + 1)
-                time.sleep(wait)
-            else:
-                raise
-
-    raw = data["choices"][0]["message"]["content"].strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```\w*\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
-    return json.loads(raw)
-
-
-def translate_segments(segments: list[dict], batch_size: int = 20) -> list[dict]:
-    import time
     all_translated = []
     total = len(segments)
+
     for i in range(0, total, batch_size):
         batch = segments[i : i + batch_size]
         texts = [s["text"] for s in batch]
         batch_num = i // batch_size + 1
         total_batches = (total + batch_size - 1) // batch_size
         emit("translate_batch", batch=batch_num, total=total_batches, segments=len(texts))
-        translated = _call_translate(texts)
+
+        raw = _call_deepseek(system_prompt, json.dumps(texts, ensure_ascii=False))
+        translated = json.loads(raw)
+
         if len(translated) != len(texts):
             emit("translate_warn", expected=len(texts), got=len(translated))
             translated = (translated + [""] * len(texts))[: len(texts)]
+
         for seg, tr in zip(batch, translated):
             all_translated.append({**seg, "text_ru": tr})
+
         if i + batch_size < total:
             time.sleep(1)
+
     return all_translated
 
 
@@ -423,7 +529,7 @@ async def main():
     video_name = video_path.stem
 
     set_video_context(args.title, args.description)
-    emit("start", video=video_name, steps=5)
+    emit("start", video=video_name, steps=6)
 
     # Step 1: Extract audio
     audio_path = folder / "original_audio.wav"
@@ -437,43 +543,70 @@ async def main():
     dur = get_duration_ms(str(audio_path))
     emit("step_done", step=1, duration_s=round(dur / 1000, 1))
 
-    # Step 2: Demucs
+    # Step 2: Demucs separation
     bg_path = folder / "background.wav"
     emit("step", step=2, name="demucs_separate")
     if not bg_path.exists():
         separate_audio(str(audio_path), folder)
     emit("step_done", step=2)
 
-    # Step 3: Translate
+    # Step 3: Flatten subtitles + add punctuation + segment by sentences
     cache_path = folder / "translation_cache.json"
-    emit("step", step=3, name="translate")
+    punctuated_cache = folder / "punctuated_text.txt"
+
     if cache_path.exists():
+        emit("step", step=3, name="punctuate")
+        emit("step_done", step=3, cached=True)
+        emit("step", step=4, name="translate")
         with open(cache_path, "r", encoding="utf-8") as f:
             segments = json.load(f)
         emit("translate_cached", segments=len(segments))
+        emit("step_done", step=4, segments=len(segments))
     else:
-        raw = parse_srt(str(srt_path))
-        segments = merge_overlapping(raw)
-        emit("translate_start", raw=len(raw), merged=len(segments))
+        # Step 3a: Flatten SRT into word stream
+        emit("step", step=3, name="punctuate")
+        raw_entries = parse_srt(str(srt_path))
+        word_times = flatten_srt(raw_entries)
+        flat_text = " ".join(w["word"] for w in word_times)
+        emit("flatten_done", raw_entries=len(raw_entries), unique_words=len(word_times))
+
+        # Step 3b: Add punctuation via DeepSeek
+        if punctuated_cache.exists():
+            with open(punctuated_cache, "r", encoding="utf-8") as f:
+                punctuated = f.read().strip()
+            emit("punctuate_cached", chars=len(punctuated))
+        else:
+            punctuated = add_punctuation(flat_text)
+            with open(punctuated_cache, "w", encoding="utf-8") as f:
+                f.write(punctuated)
+
+        # Step 3c: Split into sentence-based segments
+        segments = split_into_segments(punctuated, word_times)
+        emit("step_done", step=3, sentences=len(segments))
+
+        # Step 4: Translate sentences to Russian
+        emit("step", step=4, name="translate")
+        emit("translate_start", sentences=len(segments))
         segments = translate_segments(segments)
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(segments, f, ensure_ascii=False, indent=2)
-    emit("step_done", step=3, segments=len(segments))
+        emit("step_done", step=4, segments=len(segments))
 
+    # Write Russian SRT
     srt_out = folder / "subtitles_ru.srt"
     with open(srt_out, "w", encoding="utf-8") as f:
         for i, s in enumerate(segments, 1):
             f.write(f"{i}\n{ms_to_ts(s['start'])} --> {ms_to_ts(s['end'])}\n{s.get('text_ru', '')}\n\n")
 
-    # Step 4: TTS
+    # Step 5: TTS synthesis
     tts_dir = folder / "tts_segments"
     dubbed_path = folder / "dubbed_audio.wav"
-    emit("step", step=4, name="tts_synthesize")
+    emit("step", step=5, name="tts_synthesize")
     segments = await synthesize_segments(segments, tts_dir)
-    emit("step_done", step=4, audio_segments=len(segments))
+    emit("step_done", step=5, audio_segments=len(segments))
 
-    # Step 5: Mix + final video
-    emit("step", step=5, name="mix_and_encode")
+    # Step 6: Mix audio + encode final video
+    emit("step", step=6, name="mix_and_encode")
     build_final_audio(segments, str(bg_path), str(dubbed_path))
 
     out_video = folder / f"{video_name} [RU].mp4"

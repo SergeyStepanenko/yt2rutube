@@ -464,27 +464,58 @@ export class Worker {
   }
 
   private handleDubEvent(ev: DubEvent, videoId: number): void {
+    const stepNames: Record<string, string> = {
+      extract_audio: "извлечение аудио",
+      demucs_separate: "разделение аудио (Demucs)",
+      punctuate: "пунктуация субтитров",
+      translate: "перевод на русский",
+      tts_synthesize: "озвучка (TTS)",
+      mix_and_encode: "сведение и кодирование",
+    };
+
     switch (ev.event) {
-      case "step":
+      case "step": {
+        const step = ev.step as number;
+        const name = stepNames[ev.name as string] ?? ev.name;
         this.db.updateProgress(
           videoId,
-          ((ev.step as number) - 1) * 20,
-          `шаг ${ev.step}/5: ${ev.name}`,
+          Math.round(((step - 1) / 6) * 100),
+          `шаг ${step}/6: ${name}`,
           null
         );
         break;
+      }
       case "step_done":
-        this.db.updateProgress(videoId, (ev.step as number) * 20, null, null);
+        this.db.updateProgress(
+          videoId,
+          Math.round(((ev.step as number) / 6) * 100),
+          null,
+          null
+        );
+        break;
+      case "flatten_done":
+        this.log.info(
+          `Субтитры: ${ev.raw_entries} записей → ${ev.unique_words} уникальных слов`,
+          videoId
+        );
+        break;
+      case "punctuate_batch":
+        this.db.updateProgress(
+          videoId, 33,
+          `пунктуация: пакет ${ev.batch}/${ev.total}`,
+          null
+        );
         break;
       case "translate_batch":
         this.db.updateProgress(
-          videoId, 40,
+          videoId, 50,
           `перевод: пакет ${ev.batch}/${ev.total}`,
           null
         );
         break;
       case "translate_cached":
-        this.log.info(`Кеш перевода: ${ev.segments} сегментов`, videoId);
+      case "punctuate_cached":
+        this.log.info(`Кеш: ${ev.segments ?? ev.chars ?? ""}`, videoId);
         break;
       case "error":
         this.log.error(`[dub] ${ev.message}`, videoId);
