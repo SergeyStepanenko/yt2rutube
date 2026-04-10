@@ -258,7 +258,7 @@ def split_into_segments(punctuated_text: str, word_times: list[dict]) -> list[di
     # word_times has one entry per word; sentences split the same words.
     segments = []
     wi = 0  # current position in word_times
-    MIN_GAP_MS = 100
+    MIN_GAP_MS = 150
 
     for sent in sentences:
         sent_words = sent.split()
@@ -412,43 +412,51 @@ def build_final_audio(segments: list[dict], bg_path: str, out_path: str):
     print(f"  Background: {bg_dur / 1000:.1f}s, segments: {len(segments)}")
 
     MAX_SPEED = 2.5
+    TAIL_PAD_MS = 50  # trim a little early so audio fades before next segment
 
     filter_parts = []
     inputs = ["-i", bg_path]
 
     placed = []
+    overflows = 0
     for i, seg in enumerate(segments):
         seg_dur = get_duration_ms(seg["audio_path"])
         available = seg["end"] - seg["start"]
+        if available <= 0:
+            continue
 
-        # Determine where this segment actually starts (its offset)
+        # How much time do we actually allow (leave padding at the end)
+        trim_limit = max(available - TAIL_PAD_MS, available * 0.9)
+
         offset = seg["start"]
-
         filters = []
 
-        if seg_dur > available + 200:
+        if seg_dur > available:
             speed = seg_dur / available
             if speed > MAX_SPEED:
-                # Speed-up to MAX_SPEED, then hard-trim to fit the slot
                 chain = _atempo_chain(MAX_SPEED)
                 if chain:
                     filters.append(chain)
-                trimmed_dur_s = available / 1000
-                filters.append(f"atrim=0:{trimmed_dur_s:.3f}")
+                overflows += 1
             else:
                 chain = _atempo_chain(speed)
                 if chain:
                     filters.append(chain)
 
-        # Ensure segment doesn't bleed into the next one by trimming to slot
-        slot_s = available / 1000
-        filters.append(f"atrim=0:{slot_s:.3f}")
+        # Hard-trim to ensure it never exceeds the slot
+        trim_s = trim_limit / 1000
+        filters.append(f"atrim=0:{trim_s:.3f}")
+        # Fade out the last 30ms to avoid click artifacts
+        filters.append("afade=t=out:st={:.3f}:d=0.03".format(max(0, trim_s - 0.03)))
         filters.append(f"adelay={offset}|{offset}")
 
         filter_str = f"[{i+1}:a]" + ",".join(filters) + f"[s{i}]"
         filter_parts.append(filter_str)
         inputs.extend(["-i", seg["audio_path"]])
         placed.append(i)
+
+    if overflows:
+        print(f"  Warning: {overflows} segments exceeded {MAX_SPEED}x speed limit (trimmed)")
 
     mix_inputs = "[0:a]" + "".join(f"[s{i}]" for i in placed)
     filter_parts.append(

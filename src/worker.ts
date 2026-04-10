@@ -1,5 +1,5 @@
 import path from "path";
-import { rm } from "node:fs/promises";
+
 import { DB } from "./db";
 import { Logger } from "./logger";
 import { RutubeClient } from "./rutube";
@@ -237,10 +237,6 @@ export class Worker {
             progress: null, error: null, file_path: null,
           });
           this.log.info(`Дубликат на Rutube, пропускаем: ${row.title} → ${existingUrl}`, row.id);
-
-          if (downloadDir) {
-            try { await rm(downloadDir, { recursive: true, force: true }); } catch {}
-          }
           return;
         }
       } catch (e) {
@@ -295,13 +291,6 @@ export class Worker {
           progress: null, error: null, file_path: null,
         });
         this.log.info(`Загружено: ${row.title} → ${upload.videoUrl}`, row.id);
-
-        if (downloadDir) {
-          try {
-            await rm(downloadDir, { recursive: true, force: true });
-            this.log.info(`Файлы удалены: ${downloadDir}`, row.id);
-          } catch {}
-        }
       } else {
         this.db.updateVideoStatus(row.id, "error", {
           rutube_id: upload.videoId,
