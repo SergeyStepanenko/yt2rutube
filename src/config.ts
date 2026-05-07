@@ -8,7 +8,7 @@ export const config = {
   minDurationSec: Number(process.env.MIN_DURATION_SEC) || 60,
   maxDurationSec: Number(process.env.MAX_DURATION_SEC) || 1800,
   rutubeCategory: Number(process.env.RUTUBE_CATEGORY_ID) || 2,
-  dailyUploadLimit: Number(process.env.DAILY_UPLOAD_LIMIT) || 12,
+  dailyUploadLimit: Number(process.env.DAILY_UPLOAD_LIMIT) || 15,
   rutubeIsHidden: false,
   downloadsDir: process.env.DOWNLOADS_DIR
     ? path.resolve(process.env.DOWNLOADS_DIR)
