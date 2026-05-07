@@ -54,12 +54,13 @@ export async function downloadVideo(
 ): Promise<DownloadResult> {
   await mkdir(downloadsDir, { recursive: true });
 
+  const ytDlp = process.env.YT_DLP_PATH || "yt-dlp";
   const cookieArgs: string[] = [];
   const cookieFile = process.env.YT_COOKIES_FILE;
   if (cookieFile) cookieArgs.push("--cookies", cookieFile);
 
   const metaProc = Bun.spawn(
-    ["yt-dlp", ...cookieArgs, "--dump-json", "--no-download", url],
+    [ytDlp, ...cookieArgs, "--dump-json", "--no-download", url],
     { stdout: "pipe", stderr: "pipe" }
   );
   const [metaOut, metaErr] = await Promise.all([
@@ -94,7 +95,7 @@ export async function downloadVideo(
 
   const proc = Bun.spawn(
     [
-      "yt-dlp",
+      ytDlp,
       ...cookieArgs,
       "-f", "bestvideo+bestaudio/best",
       "--merge-output-format", "mp4",

@@ -19,15 +19,16 @@ export async function downloadVideo(
 ): Promise<VideoMeta> {
   await Bun.write(Bun.file(DOWNLOADS_DIR + "/.keep"), "");
 
+  const ytDlp = process.env.YT_DLP_PATH || "yt-dlp";
   const metaRaw =
-    await $`yt-dlp --dump-json --no-download ${url}`.text();
+    await $`${ytDlp} --dump-json --no-download ${url}`.text();
   const meta = JSON.parse(metaRaw);
 
   const outputTemplate = path.join(DOWNLOADS_DIR, "%(id)s.%(ext)s");
 
   const proc = Bun.spawn(
     [
-      "yt-dlp",
+      ytDlp,
       "-f", `bestvideo[height<=${maxHeight}]+bestaudio/best[height<=${maxHeight}]`,
       "--merge-output-format", "mp4",
       "-o", outputTemplate,
@@ -62,6 +63,7 @@ export async function downloadVideo(
 }
 
 export async function getVideoInfo(url: string): Promise<Record<string, any>> {
-  const raw = await $`yt-dlp --dump-json --no-download ${url}`.text();
+  const ytDlp = process.env.YT_DLP_PATH || "yt-dlp";
+  const raw = await $`${ytDlp} --dump-json --no-download ${url}`.text();
   return JSON.parse(raw);
 }

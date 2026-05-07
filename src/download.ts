@@ -21,8 +21,9 @@ interface DownloadResult {
 }
 
 async function download(url: string): Promise<DownloadResult> {
+  const ytDlp = process.env.YT_DLP_PATH || "yt-dlp";
   console.log(`\nПолучаем метаданные: ${url}`);
-  const metaRaw = await $`yt-dlp --dump-json --no-download ${url}`.text();
+  const metaRaw = await $`${ytDlp} --dump-json --no-download ${url}`.text();
   const meta = JSON.parse(metaRaw);
 
   const title = sanitizeFilename(meta.title);
@@ -37,7 +38,7 @@ async function download(url: string): Promise<DownloadResult> {
   console.log(`\nСкачиваем видео в максимальном качестве...`);
   const proc = Bun.spawn(
     [
-      "yt-dlp",
+      ytDlp,
       "-f", "bestvideo+bestaudio/best",
       "--merge-output-format", "mp4",
       "-o", outputTemplate,
