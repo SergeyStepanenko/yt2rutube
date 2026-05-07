@@ -51,6 +51,7 @@ ssh "$MACBOOK_USER@$MACBOOK_HOST" "
   pkill -f 'src/server.ts' 2>/dev/null || true
   sleep 2
   cd $MACBOOK_PATH
+  set -a; source .env; set +a
   nohup /Users/ssassistant/.bun/bin/bun run src/server.ts >> logs/server.log 2>&1 &
   echo \"MacBook server restarted (PID \$!)\"
 "
