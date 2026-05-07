@@ -55,6 +55,9 @@ export async function downloadVideo(
   await mkdir(downloadsDir, { recursive: true });
 
   const ytDlp = process.env.YT_DLP_PATH || "yt-dlp";
+  const ffmpegArgs: string[] = process.env.FFMPEG_PATH
+    ? ["--ffmpeg-location", process.env.FFMPEG_PATH]
+    : [];
   const cookieArgs: string[] = [];
   const cookieFile = process.env.YT_COOKIES_FILE;
   if (cookieFile) cookieArgs.push("--cookies", cookieFile);
@@ -96,6 +99,7 @@ export async function downloadVideo(
   const proc = Bun.spawn(
     [
       ytDlp,
+      ...ffmpegArgs,
       ...cookieArgs,
       "-f", "bestvideo+bestaudio/best",
       "--merge-output-format", "mp4",
