@@ -17,7 +17,8 @@ async function runYtDlp(
   const cookieArgs: string[] = [];
   const cookieFile = process.env.YT_COOKIES_FILE;
   if (cookieFile) cookieArgs.push("--cookies", cookieFile);
-  const proc = Bun.spawn(["yt-dlp", ...cookieArgs, "--sleep-requests", "2", ...args], {
+  const ytDlp = process.env.YT_DLP_PATH || "yt-dlp";
+  const proc = Bun.spawn([ytDlp, ...cookieArgs, "--sleep-requests", "2", ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });
