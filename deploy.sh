@@ -42,13 +42,14 @@ ssh "$VPS_USER@$VPS_HOST" "systemctl restart yt2rutube && systemctl is-active yt
 # ── MacBook worker ─────────────────────────────────────────────────────────────
 echo "[4/4] Sync → MacBook worker..."
 rsync "${RSYNC_OPTS[@]}" "$SCRIPT_DIR/" "$MACBOOK_USER@$MACBOOK_HOST:$MACBOOK_PATH/"
+rsync -az "$SCRIPT_DIR/.env" "$MACBOOK_USER@$MACBOOK_HOST:$MACBOOK_PATH/.env"
 
 ssh "$MACBOOK_USER@$MACBOOK_HOST" "cd $MACBOOK_PATH && /Users/ssassistant/.bun/bin/bun install --frozen-lockfile"
 
 # Restart src/server.ts (main worker on MacBook)
 ssh "$MACBOOK_USER@$MACBOOK_HOST" "
-  pkill -f 'bun run src/server.ts' 2>/dev/null || true
-  sleep 1
+  pkill -f 'src/server.ts' 2>/dev/null || true
+  sleep 2
   cd $MACBOOK_PATH
   nohup /Users/ssassistant/.bun/bin/bun run src/server.ts >> logs/server.log 2>&1 &
   echo \"MacBook server restarted (PID \$!)\"
