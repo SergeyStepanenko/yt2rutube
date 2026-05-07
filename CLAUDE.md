@@ -109,3 +109,22 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+
+## Infrastructure
+
+### Worker MacBook (dubbing/ML)
+- Host: `192.168.1.38`
+- User: `ssassistant`
+- SSH: `ssh ssassistant@192.168.1.38`
+- Role: runs dubbing pipeline (Demucs MLX, TTS), uploads finished videos to VPS via rsync
+- Logs: `~/work/yt2rutube/logs/server.log`
+
+### VPS (public server)
+- Host: `80.71.152.129`
+- User: `root`
+- SSH: `ssh root@80.71.152.129`
+- Role: serves video files to Rutube uploader, runs main worker (systemd `yt2rutube`)
+- Upload path: `/var/www/yt2rutube/`
+- Logs: `journalctl -u yt2rutube --no-pager -n 100`
+
+MacBook → VPS auth uses ED25519 key at `/Users/ssassistant/.ssh/id_ed25519`.

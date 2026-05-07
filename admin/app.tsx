@@ -34,6 +34,7 @@ interface Stats {
   isProcessing: boolean;
   currentVideoId: number | null;
   currentPhase: string | null;
+  settings: Settings;
 }
 
 interface Source {
@@ -42,7 +43,16 @@ interface Source {
   url: string;
   name: string | null;
   enabled: number;
+  fetch_limit: number;
   created_at: string;
+}
+
+interface Settings {
+  sync_interval_ms?: string;
+  max_videos_per_cycle?: string;
+  min_duration?: string;
+  max_duration?: string;
+  auto_discover?: string;
 }
 
 interface Video {
@@ -152,6 +162,10 @@ function StatsGrid({ stats }: { stats: Stats }) {
         <div className="label">Ошибки</div>
         <div className="value">{s.error ?? 0}</div>
       </div>
+      <div className="stat-card">
+        <div className="label">Пропущено</div>
+        <div className="value">{s.skipped ?? 0}</div>
+      </div>
     </div>
   );
 }
@@ -200,22 +214,38 @@ function AddVideoForm({ onAdded }: { onAdded: () => void }) {
   );
 }
 
-function AddChannelForm({ onAdded }: { onAdded: () => void }) {
+function AddSourceForm({ onAdded }: { onAdded: () => void }) {
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
+
+  function detectType(u: string): string {
+    if (u.includes("/playlist") || u.includes("list=")) return "playlist";
+    if (u.includes("/watch") || u.includes("youtu.be/")) return "video";
+    return "channel";
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!url.trim()) return;
     setLoading(true);
+    const type = detectType(url.trim());
     try {
-      const res = await fetch(`${API}/channels`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url.trim(), name: name.trim() || undefined }),
-      });
-      if (res.ok) {
+      let res: Response;
+      if (type === "channel") {
+        res = await fetch(`${API}/channels`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: url.trim(), name: name.trim() || undefined }),
+        });
+      } else {
+        res = await fetch(`${API}/sources`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type, url: url.trim(), name: name.trim() || undefined }),
+        });
+      }
+      if (res.ok || res.status === 201 || res.status === 202) {
         setUrl("");
         setName("");
         onAdded();
@@ -228,6 +258,9 @@ function AddChannelForm({ onAdded }: { onAdded: () => void }) {
     }
   }
 
+  const type = detectType(url);
+  const typeLabels: Record<string, string> = { channel: "Канал", playlist: "Плейлист", video: "Видео" };
+
   return (
     <form onSubmit={submit}>
       <div className="input-row">
@@ -235,19 +268,20 @@ function AddChannelForm({ onAdded }: { onAdded: () => void }) {
           type="url"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://youtube.com/@channel"
+          placeholder="https://youtube.com/@channel или /playlist?list=..."
           disabled={loading}
         />
         <input
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="Название (необязательно)"
+          placeholder="Название"
           disabled={loading}
-          style={{ maxWidth: 200 }}
+          style={{ maxWidth: 160 }}
         />
+        <span className="source-type-badge">{typeLabels[type] || type}</span>
         <button type="submit" disabled={loading}>
-          {loading ? "..." : "Добавить канал"}
+          {loading ? "..." : "Добавить"}
         </button>
       </div>
     </form>
@@ -262,23 +296,68 @@ function SourcesPanel({
   refetch: () => void;
 }) {
   async function remove(id: number) {
+    if (!confirm("Удалить источник?")) return;
     await fetch(`${API}/sources/${id}`, { method: "DELETE" });
     refetch();
   }
 
+  async function toggleEnabled(id: number, current: number) {
+    await fetch(`${API}/sources/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: current ? 0 : 1 }),
+    });
+    refetch();
+  }
+
+  async function updateFetchLimit(id: number, value: number) {
+    await fetch(`${API}/sources/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fetch_limit: value }),
+    });
+    refetch();
+  }
+
+  const typeLabels: Record<string, string> = { channel: "Канал", playlist: "Плейлист", video: "Видео", search: "Поиск" };
+
   return (
-    <div className="panel">
+    <div className="panel sources-panel">
       <h2>Источники ({sources.length})</h2>
-      <AddChannelForm onAdded={refetch} />
+      <AddSourceForm onAdded={refetch} />
       <ul className="source-list">
         {sources.map((s) => (
-          <li key={s.id} className="source-item">
-            <span className="source-type">{s.type}</span>
-            {s.name && <span className="name">{s.name}</span>}
-            <span className="url">{s.url}</span>
-            <button className="danger" onClick={() => remove(s.id)}>
-              Удалить
-            </button>
+          <li key={s.id} className={`source-item ${s.enabled ? "" : "disabled"}`}>
+            <div className="source-row">
+              <button
+                className={`toggle-btn ${s.enabled ? "on" : "off"}`}
+                onClick={() => toggleEnabled(s.id, s.enabled)}
+                title={s.enabled ? "Отключить" : "Включить"}
+              >
+                {s.enabled ? "ON" : "OFF"}
+              </button>
+              <span className="source-type">{typeLabels[s.type] || s.type}</span>
+              <span className="source-info">
+                {s.name && <span className="name">{s.name}</span>}
+                <span className="url">{s.url}</span>
+              </span>
+              {s.type !== "video" && (
+                <label className="fetch-limit-label" title="Сколько последних видео проверять при каждом цикле">
+                  Лимит:
+                  <select
+                    value={s.fetch_limit}
+                    onChange={(e) => updateFetchLimit(s.id, Number(e.target.value))}
+                  >
+                    {[3, 5, 10, 15, 20, 50].map(n => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <button className="danger small" onClick={() => remove(s.id)}>
+                &times;
+              </button>
+            </div>
           </li>
         ))}
         {sources.length === 0 && (
@@ -437,6 +516,9 @@ function VideosSection({
   setPage,
   refetch,
   currentVideoId,
+  sources,
+  sourceFilter,
+  setSourceFilter,
 }: {
   videos: Video[];
   total: number;
@@ -446,6 +528,9 @@ function VideosSection({
   setPage: (p: number) => void;
   refetch: () => void;
   currentVideoId: number | null;
+  sources: Source[];
+  sourceFilter: string;
+  setSourceFilter: (f: string) => void;
 }) {
   const pageSize = 50;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -473,9 +558,33 @@ function VideosSection({
     refetch();
   }
 
+  async function bulkAction(action: string) {
+    const labels: Record<string, string> = {
+      reset_errors: "Сбросить все ошибки?",
+      skip_pending: "Пропустить всю очередь?",
+    };
+    if (!confirm(labels[action] || "Выполнить?")) return;
+    await fetch(`${API}/videos/bulk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    refetch();
+  }
+
   return (
     <div className="videos-section">
-      <h2>Видео ({total})</h2>
+      <div className="videos-header">
+        <h2>Видео ({total})</h2>
+        <div className="bulk-actions">
+          <button className="small secondary" onClick={() => bulkAction("reset_errors")} title="Сбросить все ошибки в очередь">
+            Сбросить ошибки
+          </button>
+          <button className="small secondary" onClick={() => bulkAction("skip_pending")} title="Пропустить все видео в очереди">
+            Пропустить очередь
+          </button>
+        </div>
+      </div>
       <div className="filter-bar">
         {Object.entries(STATUS_LABELS).map(([key, label]) => (
           <button
@@ -489,6 +598,18 @@ function VideosSection({
             {label}
           </button>
         ))}
+        {sources.length > 0 && (
+          <select
+            className="source-filter"
+            value={sourceFilter}
+            onChange={(e) => { setSourceFilter(e.target.value); setPage(0); }}
+          >
+            <option value="">Все источники</option>
+            {sources.map(s => (
+              <option key={s.id} value={s.id}>{s.name || s.url}</option>
+            ))}
+          </select>
+        )}
       </div>
 
       <ul className="video-list">
@@ -554,6 +675,111 @@ function LogsSection({ logs }: { logs: LogEntry[] }) {
   );
 }
 
+const INTERVAL_OPTIONS = [
+  { label: "30 мин", value: 1_800_000 },
+  { label: "1 час", value: 3_600_000 },
+  { label: "2 часа", value: 7_200_000 },
+  { label: "4 часа", value: 14_400_000 },
+  { label: "8 часов", value: 28_800_000 },
+  { label: "12 часов", value: 43_200_000 },
+  { label: "24 часа", value: 86_400_000 },
+];
+
+function SettingsPanel({
+  settings,
+  refetch,
+}: {
+  settings: Settings;
+  refetch: () => void;
+}) {
+  const [interval, setInterval_] = useState(settings.sync_interval_ms ?? "14400000");
+  const [maxPerCycle, setMaxPerCycle] = useState(settings.max_videos_per_cycle ?? "1");
+  const [minDur, setMinDur] = useState(settings.min_duration ?? "60");
+  const [maxDur, setMaxDur] = useState(settings.max_duration ?? "1800");
+  const [autoDiscover, setAutoDiscover] = useState(settings.auto_discover !== "0");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    if (dirty) return;
+    setInterval_(settings.sync_interval_ms ?? "14400000");
+    setMaxPerCycle(settings.max_videos_per_cycle ?? "1");
+    setMinDur(settings.min_duration ?? "60");
+    setMaxDur(settings.max_duration ?? "1800");
+    setAutoDiscover(settings.auto_discover !== "0");
+  }, [settings, dirty]);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await fetch(`${API}/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sync_interval_ms: interval,
+          max_videos_per_cycle: maxPerCycle,
+          min_duration: minDur,
+          max_duration: maxDur,
+          auto_discover: autoDiscover ? "1" : "0",
+        }),
+      });
+      setDirty(false);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+      refetch();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="panel settings-panel">
+      <h2>Настройки</h2>
+      <div className="settings-grid">
+        <label>
+          <span className="setting-label">Автообнаружение</span>
+          <button
+            className={`toggle-btn ${autoDiscover ? "on" : "off"}`}
+            onClick={() => { setAutoDiscover(!autoDiscover); setDirty(true); }}
+          >
+            {autoDiscover ? "ON" : "OFF"}
+          </button>
+        </label>
+        <label>
+          <span className="setting-label">Интервал синхронизации</span>
+          <select value={interval} onChange={(e) => { setInterval_(e.target.value); setDirty(true); }}>
+            {INTERVAL_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span className="setting-label">Видео за цикл</span>
+          <select value={maxPerCycle} onChange={(e) => { setMaxPerCycle(e.target.value); setDirty(true); }}>
+            {[1, 2, 3, 5, 10].map(n => (
+              <option key={n} value={n}>{n}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span className="setting-label">Мин. длительность (сек)</span>
+          <input type="number" value={minDur} onChange={(e) => { setMinDur(e.target.value); setDirty(true); }} min={0} max={3600} style={{ width: 80 }} />
+        </label>
+        <label>
+          <span className="setting-label">Макс. длительность (сек)</span>
+          <input type="number" value={maxDur} onChange={(e) => { setMaxDur(e.target.value); setDirty(true); }} min={60} max={36000} style={{ width: 80 }} />
+        </label>
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <button onClick={save} disabled={saving} className={dirty ? "" : "secondary"}>
+          {saving ? "Сохранение..." : saved ? "Сохранено!" : dirty ? "Сохранить" : "Сохранено"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PipelineLegend() {
   return (
     <div className="pipeline-legend">
@@ -592,12 +818,14 @@ function App() {
 
   const [videoFilter, setVideoFilter] = useState("all");
   const [videoPage, setVideoPage] = useState(0);
+  const [sourceFilter, setSourceFilter] = useState("");
 
   const statusParam = videoFilter === "all" ? "" : `&status=${videoFilter}`;
+  const sourceParam = sourceFilter ? `&source_id=${sourceFilter}` : "";
   const { data: videosData, refetch: refetchVideos } = useFetch<{
     videos: Video[];
     total: number;
-  }>(`${API}/videos?limit=50&offset=${videoPage * 50}${statusParam}`, 2000);
+  }>(`${API}/videos?limit=50&offset=${videoPage * 50}${statusParam}${sourceParam}`, 2000);
 
   function refetchAll() {
     refetchStats();
@@ -654,6 +882,7 @@ function App() {
       <div className="panels">
         <SourcesPanel sources={sources ?? []} refetch={refetchAll} />
         <AddVideoPanel onAdded={refetchAll} />
+        <SettingsPanel settings={stats.settings ?? {}} refetch={refetchAll} />
       </div>
 
       <VideosSection
@@ -665,6 +894,9 @@ function App() {
         setPage={setVideoPage}
         refetch={refetchAll}
         currentVideoId={stats.currentVideoId}
+        sources={sources ?? []}
+        sourceFilter={sourceFilter}
+        setSourceFilter={setSourceFilter}
       />
 
       <LogsSection logs={logs ?? []} />

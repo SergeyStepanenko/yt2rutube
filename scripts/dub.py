@@ -19,10 +19,10 @@ Prints JSON status to stdout for progress tracking.
 """
 
 import argparse
-import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -30,7 +30,20 @@ from pathlib import Path
 
 DEEPSEEK_API_KEY = os.environ.get("DEEP_SEEK_API_KEY", "")
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
-VOICE = "ru-RU-DmitryNeural"
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+def _find_bin(name: str) -> str:
+    found = shutil.which(name)
+    if found:
+        return found
+    for prefix in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"):
+        p = os.path.join(prefix, name)
+        if os.path.isfile(p):
+            return p
+    return name
+
+FFMPEG = _find_bin("ffmpeg")
+FFPROBE = _find_bin("ffprobe")
 
 
 def emit(event: str, **data):
@@ -142,12 +155,12 @@ def flatten_srt(entries: list[dict]) -> list[dict]:
     return word_times
 
 
-def _call_deepseek(system: str, user: str, temperature: float = 0.3) -> str:
+def _call_deepseek(system: str, user: str, temperature: float = 0.3, model: str = "deepseek-chat") -> str:
     """Generic DeepSeek API call with retry."""
     import time
 
     payload = json.dumps({
-        "model": "deepseek-chat",
+        "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -179,6 +192,42 @@ def _call_deepseek(system: str, user: str, temperature: float = 0.3) -> str:
         raw = re.sub(r"^```\w*\n?", "", raw)
         raw = re.sub(r"\n?```$", "", raw)
     return raw
+
+
+def _call_claude(system: str, user: str, temperature: float = 0.3) -> str:
+    """Generic Claude Sonnet 4.6 API call with retry."""
+    import time
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    for attempt in range(5):
+        try:
+            msg = client.messages.create(
+                model="deepseek-v4-flash",
+                max_tokens=4096,
+                temperature=temperature,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            raw = msg.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```\w*\n?", "", raw)
+                raw = re.sub(r"\n?```$", "", raw)
+            return raw
+        except (anthropic.RateLimitError, anthropic.InternalServerError) as e:
+            if attempt < 4:
+                wait = (attempt + 1) * 5
+                code = getattr(e, "status_code", "?")
+                emit("api_retry", code=code, wait=wait, attempt=attempt + 1)
+                time.sleep(wait)
+            else:
+                raise
+        except Exception:
+            if attempt < 4:
+                time.sleep((attempt + 1) * 5)
+            else:
+                raise
 
 
 def add_punctuation(text: str, batch_size: int = 800) -> str:
@@ -254,11 +303,11 @@ def split_into_segments(punctuated_text: str, word_times: list[dict]) -> list[di
     if not sentences:
         return []
 
-    # Map sentences to word_times.
-    # word_times has one entry per word; sentences split the same words.
+    # Map sentences to word_times (use real timings).
     segments = []
-    wi = 0  # current position in word_times
-    MIN_GAP_MS = 150
+    wi = 0
+    MIN_GAP_MS = 200
+    MIN_SEGMENT_MS = 2000
 
     for sent in sentences:
         sent_words = sent.split()
@@ -266,7 +315,6 @@ def split_into_segments(punctuated_text: str, word_times: list[dict]) -> list[di
         if n == 0:
             continue
 
-        # Consume n words from word_times
         if wi >= len(word_times):
             break
 
@@ -276,7 +324,6 @@ def split_into_segments(punctuated_text: str, word_times: list[dict]) -> list[di
         seg_start = word_times[start_idx]["start"]
         seg_end = word_times[end_idx]["end"]
 
-        # Enforce minimum duration
         if seg_end - seg_start < 300:
             seg_end = seg_start + max(300, n * 150)
 
@@ -288,6 +335,9 @@ def split_into_segments(punctuated_text: str, word_times: list[dict]) -> list[di
 
         wi += n
 
+    if not segments:
+        return []
+
     # Enforce non-overlapping with minimum gap
     for i in range(1, len(segments)):
         if segments[i]["start"] < segments[i - 1]["end"] + MIN_GAP_MS:
@@ -295,10 +345,36 @@ def split_into_segments(punctuated_text: str, word_times: list[dict]) -> list[di
         if segments[i]["start"] >= segments[i]["end"]:
             segments[i]["end"] = segments[i]["start"] + 500
 
+    # Merge only truly short segments (< MIN_SEGMENT_MS) into neighbors.
+    # Single pass, non-cascading: merge short seg into previous if combined
+    # duration stays reasonable, otherwise into next.
+    merged = [segments[0]]
+    for seg in segments[1:]:
+        prev = merged[-1]
+        prev_dur = prev["end"] - prev["start"]
+        seg_dur = seg["end"] - seg["start"]
+
+        if seg_dur < MIN_SEGMENT_MS and prev_dur < 15000:
+            prev["end"] = seg["end"]
+            prev["text"] += " " + seg["text"]
+        elif prev_dur < MIN_SEGMENT_MS and seg_dur < 15000:
+            seg["start"] = prev["start"]
+            seg["text"] = prev["text"] + " " + seg["text"]
+            merged[-1] = seg
+        else:
+            merged.append(dict(seg))
+    segments = merged
+
+    # Extend each segment into the gap before next (use silence for TTS breathing room)
+    for i in range(len(segments) - 1):
+        gap = segments[i + 1]["start"] - segments[i]["end"]
+        if gap > MIN_GAP_MS:
+            segments[i]["end"] += gap - MIN_GAP_MS
+
     return segments
 
 
-# ── Translation (DeepSeek) ────────────────────────────────────
+# ── Translation (Claude) ──────────────────────────────────────
 
 _video_context = ""
 
@@ -315,7 +391,7 @@ def set_video_context(title: str = "", description: str = ""):
 
 
 def translate_segments(segments: list[dict], batch_size: int = 25) -> list[dict]:
-    """Translate punctuated English sentences to Russian via DeepSeek."""
+    """Translate punctuated English sentences to Russian via Claude."""
     import time
 
     system_prompt = (
@@ -323,10 +399,16 @@ def translate_segments(segments: list[dict], batch_size: int = 25) -> list[dict]
         "Translate English live commentary into natural, energetic Russian — "
         "as if you are commentating live on TV.\n\n"
         "Rules:\n"
-        "- Translate naturally, not literally. Adapt to Russian style.\n"
-        "- CRITICAL: Keep translations CONCISE. Russian text will be spoken aloud by TTS "
-        "and must fit roughly the same time slot as English. "
-        "Prefer shorter phrasings. Omit filler words.\n"
+        "- Translate naturally, not literally. Adapt to Russian conversational style.\n"
+        "- CRITICAL: Keep translations compact. Each Russian phrase will be spoken by TTS "
+        "in the SAME time slot as the English original. Russian words are longer than English, "
+        "so aim for ~85-90% of original word count. Cut only filler words, keep full natural phrases.\n"
+        "- HUMANIZE the text: use colloquial expressions, interjections (ого, ну, вот это да, "
+        "э-э, ах), contractions, and natural speech patterns that a real person would use. "
+        "Avoid robotic/bookish phrasing. Write as people SPEAK, not as they write. "
+        "Never cut a phrase so short it sounds like a telegram.\n"
+        "- Vary sentence rhythm — mix short punchy exclamations with longer phrases. "
+        "Don't make every sentence the same structure.\n"
         "- Keep proper names (people, places, brands) in original.\n"
         "- Use correct sport terminology.\n"
         "- Keep the energy and excitement of live commentary.\n"
@@ -346,7 +428,7 @@ def translate_segments(segments: list[dict], batch_size: int = 25) -> list[dict]
         total_batches = (total + batch_size - 1) // batch_size
         emit("translate_batch", batch=batch_num, total=total_batches, segments=len(texts))
 
-        raw = _call_deepseek(system_prompt, json.dumps(texts, ensure_ascii=False))
+        raw = _call_deepseek(system_prompt, json.dumps(texts, ensure_ascii=False), model="deepseek-v4-flash")
         translated = json.loads(raw)
 
         if len(translated) != len(texts):
@@ -362,34 +444,137 @@ def translate_segments(segments: list[dict], batch_size: int = 25) -> list[dict]
     return all_translated
 
 
-# ── TTS ──────────────────────────────────────────────────────
+def critique_translations(segments: list[dict], batch_size: int = 15) -> list[dict]:
+    """Two-pass critic: rewrite translations that don't fit or flow poorly."""
+    system = (
+        "Ты — редактор дублированного спортивного комментария. "
+        "Для каждого сегмента дай улучшенный перевод на русский. "
+        "Требования:\n"
+        "1. ДЛИНА: Перевод должен укладываться в available_ms миллисекунд при скорости ~2.2 слова/сек. "
+        "   Целевое количество слов = target_words. Не превышай его.\n"
+        "2. СВЯЗНОСТЬ: Учитывай prev_ru и next_ru — избегай неловких повторов "
+        "   и лишних союзов на стыках.\n"
+        "3. ЭНЕРГИЯ: Сохраняй живой разговорный стиль комментатора.\n"
+        "Верни JSON-массив объектов {\"text_ru\": \"...\"} в том же порядке и количестве. "
+        "Без markdown, без пояснений."
+    )
+
+    result = list(segments)
+
+    for i in range(0, len(segments), batch_size):
+        batch = segments[i : i + batch_size]
+        batch_num = i // batch_size + 1
+        total_batches = (len(segments) + batch_size - 1) // batch_size
+        emit("critique_batch", batch=batch_num, total=total_batches)
+
+        items = []
+        for j, seg in enumerate(batch):
+            available_ms = seg["end"] - seg["start"]
+            target_words = round(available_ms / 1000 * 2.2)
+            prev_ru = result[i + j - 1].get("text_ru", "") if i + j > 0 else ""
+            next_ru = segments[i + j + 1].get("text_ru", "") if i + j + 1 < len(segments) else ""
+            items.append({
+                "en": seg.get("text", ""),
+                "ru": seg.get("text_ru", ""),
+                "available_ms": available_ms,
+                "target_words": target_words,
+                "prev_ru": prev_ru,
+                "next_ru": next_ru,
+            })
+
+        raw = _call_deepseek(system, json.dumps(items, ensure_ascii=False), model="deepseek-v4-flash")
+        critiqued = json.loads(raw)
+
+        if len(critiqued) != len(batch):
+            emit("critique_warn", expected=len(batch), got=len(critiqued))
+            critiqued = (critiqued + [{}] * len(batch))[: len(batch)]
+
+        for j, item in enumerate(critiqued):
+            if item.get("text_ru"):
+                result[i + j]["text_ru"] = item["text_ru"]
+
+    return result
+
+
+# ── TTS (Coqui XTTS v2) ──────────────────────────────────────
+
+XTTS_SPEAKERS = ["Viktor Eka", "Damien Black"]
+
+_xtts_model = None
+_xtts_speaker = None
+_accentizer = None
+
+
+def _load_accentizer():
+    global _accentizer
+    if _accentizer is not None:
+        return
+    from ruaccent import RUAccent
+    emit("ruaccent_load", msg="loading RuAccent...")
+    _accentizer = RUAccent()
+    _accentizer.load(omograph_model_size="turbo3.1", use_dictionary=True)
+    emit("ruaccent_ready")
+
+
+def _apply_yo(text: str) -> str:
+    """Restore ё letters via RuAccent, strip + stress markers (XTTS doesn't need them)."""
+    try:
+        _load_accentizer()
+        return _accentizer.process_all(text).replace("+", "")
+    except Exception:
+        return text
+
+
+def _load_xtts():
+    global _xtts_model
+    if _xtts_model is not None:
+        return
+    import torch
+    os.environ["COQUI_TOS_AGREED"] = "1"
+    from TTS.api import TTS
+    emit("xtts_load", msg="loading XTTS v2 model...")
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    _xtts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+    emit("xtts_ready", device=device)
+
+
+def _tts_one(text: str, out_path: Path):
+    """Synthesize one TTS segment with XTTS v2."""
+    _load_xtts()
+    text_yo = _apply_yo(text)
+    _xtts_model.tts_to_file(
+        text=text_yo,
+        speaker=_xtts_speaker,
+        language="ru",
+        file_path=str(out_path),
+    )
 
 
 def _shorten_text(text_ru: str, target_words: int, original_en: str) -> str:
-    """Ask DeepSeek to rephrase Russian text to be shorter."""
+    """Ask Claude to rephrase Russian text to be shorter."""
     system = (
-        "Ты — редактор русских субтитров. Тебе дан перевод фразы, "
+        "Ты — редактор русских субтитров для спортивного комментатора. Тебе дан перевод фразы, "
         "который слишком длинный для озвучки. Перефразируй его КОРОЧЕ — "
-        f"максимум {target_words} слов. Сохрани смысл и энергию. "
+        f"максимум {target_words} слов. Сохрани смысл, энергию и живую разговорную интонацию. "
+        "Используй разговорный стиль, как настоящий комментатор. "
         "Не добавляй ничего нового. Верни ТОЛЬКО сокращённый текст, без кавычек."
     )
     user = f"Английский оригинал: {original_en}\nТекущий перевод: {text_ru}"
-    return _call_deepseek(system, user, temperature=0.4).strip().strip('"')
+    return _call_deepseek(system, user, temperature=0.4, model="deepseek-v4-flash").strip().strip('"')
 
 
-async def _tts_one(text: str, out_path: Path):
-    """Synthesize one TTS segment."""
-    import edge_tts
-    comm = edge_tts.Communicate(text, VOICE, rate="+20%")
-    await comm.save(str(out_path))
+def synthesize_segments(segments: list[dict], output_dir: Path) -> list[dict]:
+    import random
+    global _xtts_speaker
+    _xtts_speaker = random.choice(XTTS_SPEAKERS)
+    emit("tts_speaker", speaker=_xtts_speaker)
 
-
-async def synthesize_segments(segments: list[dict], output_dir: Path) -> list[dict]:
     output_dir.mkdir(parents=True, exist_ok=True)
     results = []
     shortened = 0
-    MAX_RETRIES = 2
-    OVERFLOW_THRESHOLD = 1.3  # TTS > 130% of slot → rephrase
+    skipped = 0
+    SHORTEN_RETRIES = 5
+    FIT_TOLERANCE = 1.05  # TTS can be up to 5% longer than slot (trimmed at assembly)
 
     for i, seg in enumerate(segments):
         text_ru = seg.get("text_ru", "").strip()
@@ -397,43 +582,68 @@ async def synthesize_segments(segments: list[dict], output_dir: Path) -> list[di
             continue
 
         available = seg["end"] - seg["start"]
-        out_path = output_dir / f"seg_{i:04d}.mp3"
+        if available <= 0:
+            continue
+
+        out_path = output_dir / f"seg_{i:04d}.wav"
         current_text = text_ru
 
-        for attempt in range(MAX_RETRIES + 1):
+        # Skip synthesis if cached segment already exists
+        if out_path.exists() and out_path.stat().st_size > 1000:
+            tts_dur = get_duration_ms(str(out_path))
+            results.append({**seg, "text_ru": current_text, "audio_path": str(out_path)})
+            sys.stdout.write(f"\r  TTS: {i + 1}/{len(segments)} (cached)")
+            sys.stdout.flush()
+            continue
+
+        try:
+            _tts_one(current_text, out_path)
+        except Exception as e:
+            emit("tts_error", index=i, error=str(e)[:120])
+            continue
+
+        tts_dur = get_duration_ms(str(out_path))
+
+        for _ in range(SHORTEN_RETRIES):
+            if tts_dur <= available * FIT_TOLERANCE:
+                break
+            ratio = tts_dur / available
+            current_words = len(current_text.split())
+            target_words = max(2, int(current_words / ratio * 0.8))
+            if target_words >= current_words:
+                target_words = current_words - 1
+            if target_words < 2:
+                break
             try:
-                await _tts_one(current_text, out_path)
-            except Exception as e:
-                print(f"\n  TTS error seg {i}: {e}")
+                new_text = _shorten_text(
+                    current_text, target_words, seg.get("text", "")
+                )
+                if new_text and len(new_text.split()) < current_words:
+                    current_text = new_text
+                    shortened += 1
+                    _tts_one(current_text, out_path)
+                    tts_dur = get_duration_ms(str(out_path))
+                else:
+                    break
+            except Exception:
                 break
 
-            tts_dur = get_duration_ms(str(out_path))
-
-            if available > 0 and tts_dur > available * OVERFLOW_THRESHOLD and attempt < MAX_RETRIES:
-                # TTS is too long — ask DeepSeek to shorten
-                ratio = tts_dur / available
-                current_words = len(current_text.split())
-                target_words = max(3, int(current_words / ratio * 0.9))
-                try:
-                    new_text = _shorten_text(
-                        current_text, target_words, seg.get("text", "")
-                    )
-                    if new_text and len(new_text.split()) < current_words:
-                        current_text = new_text
-                        shortened += 1
-                        continue
-                except Exception:
-                    pass
-
-            break
+        if tts_dur > available * 1.3:
+            skipped += 1
+            emit("tts_skip", index=i, tts_ms=tts_dur, available_ms=available,
+                 ratio=round(tts_dur / available, 2), text=current_text[:60])
+            continue
 
         results.append({**seg, "text_ru": current_text, "audio_path": str(out_path)})
+
         sys.stdout.write(f"\r  TTS: {i + 1}/{len(segments)}")
         sys.stdout.flush()
 
     print()
     if shortened:
         emit("tts_shortened", count=shortened, total=len(segments))
+    if skipped:
+        emit("tts_skipped", count=skipped, total=len(segments))
     return results
 
 
@@ -441,83 +651,54 @@ async def synthesize_segments(segments: list[dict], output_dir: Path) -> list[di
 
 def get_duration_ms(path: str) -> int:
     r = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+        [FFPROBE, "-v", "quiet", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", path],
         capture_output=True, text=True,
     )
     return int(float(r.stdout.strip()) * 1000)
 
 
-def _atempo_chain(speed: float) -> str:
-    """Build chained atempo filters for speeds > 2.0x (ffmpeg limit per filter is 0.5–2.0)."""
-    parts = []
-    while speed > 2.0:
-        parts.append("atempo=2.0")
-        speed /= 2.0
-    if speed > 1.001:
-        parts.append(f"atempo={speed:.3f}")
-    return ",".join(parts) if parts else ""
-
-
 def build_final_audio(segments: list[dict], bg_path: str, out_path: str):
     bg_dur = get_duration_ms(bg_path)
     print(f"  Background: {bg_dur / 1000:.1f}s, segments: {len(segments)}")
 
-    MAX_SPEED = 2.5
-    TAIL_PAD_MS = 50  # trim a little early so audio fades before next segment
+    TAIL_PAD_MS = 80
 
     filter_parts = []
     inputs = ["-i", bg_path]
 
     placed = []
-    overflows = 0
     for i, seg in enumerate(segments):
         seg_dur = get_duration_ms(seg["audio_path"])
         available = seg["end"] - seg["start"]
         if available <= 0:
             continue
 
-        # How much time do we actually allow (leave padding at the end)
         trim_limit = max(available - TAIL_PAD_MS, available * 0.9)
+        trim_s = min(seg_dur, trim_limit) / 1000
 
         offset = seg["start"]
-        filters = []
-
-        if seg_dur > available:
-            speed = seg_dur / available
-            if speed > MAX_SPEED:
-                chain = _atempo_chain(MAX_SPEED)
-                if chain:
-                    filters.append(chain)
-                overflows += 1
-            else:
-                chain = _atempo_chain(speed)
-                if chain:
-                    filters.append(chain)
-
-        # Hard-trim to ensure it never exceeds the slot
-        trim_s = trim_limit / 1000
-        filters.append(f"atrim=0:{trim_s:.3f}")
-        # Fade out the last 30ms to avoid click artifacts
-        filters.append("afade=t=out:st={:.3f}:d=0.03".format(max(0, trim_s - 0.03)))
-        filters.append(f"adelay={offset}|{offset}")
+        filters = [
+            f"aresample=44100",
+            f"atrim=0:{trim_s:.3f}",
+            "afade=t=out:st={:.3f}:d=0.05".format(max(0, trim_s - 0.05)),
+            f"adelay={offset}|{offset}",
+        ]
 
         filter_str = f"[{i+1}:a]" + ",".join(filters) + f"[s{i}]"
         filter_parts.append(filter_str)
         inputs.extend(["-i", seg["audio_path"]])
         placed.append(i)
 
-    if overflows:
-        print(f"  Warning: {overflows} segments exceeded {MAX_SPEED}x speed limit (trimmed)")
-
     mix_inputs = "[0:a]" + "".join(f"[s{i}]" for i in placed)
+    # normalize=0: no auto-attenuation; limiter prevents clipping
     filter_parts.append(
-        f"{mix_inputs}amix=inputs={len(placed)+1}:duration=first:dropout_transition=0,"
-        f"volume={len(placed)+1}[out]"
+        f"{mix_inputs}amix=inputs={len(placed)+1}:duration=first:dropout_transition=0:normalize=0,"
+        f"alimiter=level_in=1:level_out=1:limit=0.95:attack=5:release=50[out]"
     )
 
     cmd = [
-        "ffmpeg", "-y", *inputs,
+        FFMPEG, "-y", *inputs,
         "-filter_complex", ";\n".join(filter_parts),
         "-map", "[out]", "-ac", "2", "-ar", "44100", out_path,
     ]
@@ -552,7 +733,7 @@ def separate_audio(audio_path: str, folder: Path):
     for s in bg_stems:
         inputs.extend(["-i", s])
     subprocess.run(
-        ["ffmpeg", "-y", *inputs,
+        [FFMPEG, "-y", *inputs,
          "-filter_complex", f"amix=inputs={len(bg_stems)}:duration=longest",
          bg_out],
         capture_output=True, text=True, check=True,
@@ -562,7 +743,7 @@ def separate_audio(audio_path: str, folder: Path):
 
 # ── Main ─────────────────────────────────────────────────────
 
-async def main():
+def main():
     parser = argparse.ArgumentParser(description="Video dubbing EN→RU")
     parser.add_argument("folder", help="Video folder path")
     parser.add_argument("--title", default="", help="Video title for translation context")
@@ -596,7 +777,7 @@ async def main():
     emit("step", step=1, name="extract_audio")
     if not audio_path.exists():
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(video_path), "-vn",
+            [FFMPEG, "-y", "-i", str(video_path), "-vn",
              "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", str(audio_path)],
             capture_output=True, text=True, check=True,
         )
@@ -644,10 +825,12 @@ async def main():
         segments = split_into_segments(punctuated, word_times)
         emit("step_done", step=3, sentences=len(segments))
 
-        # Step 4: Translate sentences to Russian
+        # Step 4: Translate sentences to Russian (Claude), then two-pass critic
         emit("step", step=4, name="translate")
         emit("translate_start", sentences=len(segments))
         segments = translate_segments(segments)
+        emit("critique_start", segments=len(segments))
+        segments = critique_translations(segments)
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(segments, f, ensure_ascii=False, indent=2)
         emit("step_done", step=4, segments=len(segments))
@@ -658,22 +841,27 @@ async def main():
         for i, s in enumerate(segments, 1):
             f.write(f"{i}\n{ms_to_ts(s['start'])} --> {ms_to_ts(s['end'])}\n{s.get('text_ru', '')}\n\n")
 
-    # Step 5: TTS synthesis (with auto-shortening of overlong translations)
+    # Step 5: TTS synthesis (Silero + RuAccent, with auto-shortening of overlong translations)
     tts_dir = folder / "tts_segments"
     dubbed_path = folder / "dubbed_audio.wav"
     emit("step", step=5, name="tts_synthesize")
-    segments = await synthesize_segments(segments, tts_dir)
+    segments = synthesize_segments(segments, tts_dir)
     emit("step_done", step=5, audio_segments=len(segments))
 
-    # Update cache with any shortened text_ru
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(
-            [
-                {k: v for k, v in s.items() if k != "audio_path"}
-                for s in segments
-            ],
-            f, ensure_ascii=False, indent=2,
-        )
+    # Update text_ru in full cache for any segments that were shortened during TTS.
+    # Load full cache (all translated segments) and patch only the shortened ones.
+    if segments:
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                full_cache = json.load(f)
+            shortened_map = {s["start"]: s["text_ru"] for s in segments if "text_ru" in s}
+            for seg in full_cache:
+                if seg["start"] in shortened_map:
+                    seg["text_ru"] = shortened_map[seg["start"]]
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(full_cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     # Step 6: Mix audio + encode final video
     emit("step", step=6, name="mix_and_encode")
@@ -681,9 +869,10 @@ async def main():
 
     out_video = folder / f"{video_name} [RU].mp4"
     subprocess.run(
-        ["ffmpeg", "-y",
+        [FFMPEG, "-y",
          "-i", str(video_path), "-i", str(dubbed_path),
          "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0",
+         "-c:a", "aac", "-b:a", "320k",
          "-shortest", str(out_video)],
         capture_output=True, text=True, check=True,
     )
@@ -693,4 +882,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

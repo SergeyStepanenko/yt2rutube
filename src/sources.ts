@@ -14,7 +14,10 @@ function watchUrl(id: string): string {
 async function runYtDlp(
   args: string[]
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["yt-dlp", ...args], {
+  const cookieArgs: string[] = [];
+  const cookieFile = process.env.YT_COOKIES_FILE;
+  if (cookieFile) cookieArgs.push("--cookies", cookieFile);
+  const proc = Bun.spawn(["yt-dlp", ...cookieArgs, "--sleep-requests", "2", ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -149,8 +152,15 @@ export async function fetchChannelVideos(
   for (const obj of parseJsonLines(stdout)) {
     const partial = entryToPartial(obj);
     if (!partial) continue;
-    const info = await enrichWithFullJson(partial);
-    if (info) results.push(info);
+    if (partial.width > 0 && partial.height > 0 && partial.width <= partial.height) continue;
+    results.push({
+      youtubeId: partial.youtubeId,
+      youtubeUrl: partial.youtubeUrl,
+      title: partial.title,
+      duration: partial.duration,
+      width: partial.width,
+      height: partial.height,
+    });
   }
   return results;
 }
@@ -166,8 +176,15 @@ export async function fetchPlaylistVideos(
   for (const obj of parseJsonLines(stdout)) {
     const partial = entryToPartial(obj);
     if (!partial) continue;
-    const info = await enrichWithFullJson(partial);
-    if (info) results.push(info);
+    if (partial.width > 0 && partial.height > 0 && partial.width <= partial.height) continue;
+    results.push({
+      youtubeId: partial.youtubeId,
+      youtubeUrl: partial.youtubeUrl,
+      title: partial.title,
+      duration: partial.duration,
+      width: partial.width,
+      height: partial.height,
+    });
   }
   return results;
 }

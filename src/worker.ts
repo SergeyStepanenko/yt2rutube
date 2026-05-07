@@ -59,8 +59,19 @@ export class Worker {
     try {
       await this.ensureLogin();
       await this.discoverVideos();
-      await this.processQueue();
-      await this.retryFailed();
+
+      const dailyLimit = this.db.getSettingNum("daily_upload_limit", config.dailyUploadLimit);
+      const uploadedToday = this.db.getDailyUploadCount();
+      const remaining = Math.max(0, dailyLimit - uploadedToday);
+
+      if (remaining === 0) {
+        this.log.info(`Дневной лимит загрузок исчерпан (${uploadedToday}/${dailyLimit})`);
+      } else {
+        this.log.info(`Загружено сегодня: ${uploadedToday}/${dailyLimit}, осталось: ${remaining}`);
+        const afterRetry = await this.retryFailed(remaining);
+        await this.processQueue(afterRetry);
+      }
+
       this._lastCycleAt = new Date();
     } finally {
       this._isProcessing = false;
@@ -70,17 +81,29 @@ export class Worker {
   }
 
   private async discoverVideos(): Promise<void> {
+    const autoDiscover = this.db.getSetting("auto_discover");
+    if (autoDiscover === "0") {
+      this.log.info("Автообнаружение отключено");
+      return;
+    }
+
     const sources = this.db.getSources();
+    if (sources.length === 0) return;
+
+    const minDur = this.db.getSettingNum("min_duration", config.minDurationSec);
+    const maxDur = this.db.getSettingNum("max_duration", config.maxDurationSec);
+
     this.log.info(`Обнаружение видео из ${sources.length} источников`);
 
     for (const source of sources) {
       try {
         let videos: Awaited<ReturnType<typeof fetchChannelVideos>> = [];
+        const limit = source.fetch_limit || config.defaultFetchLimit;
 
         if (source.type === "channel") {
-          videos = await fetchChannelVideos(source.url);
+          videos = await fetchChannelVideos(source.url, limit);
         } else if (source.type === "playlist") {
-          videos = await fetchPlaylistVideos(source.url);
+          videos = await fetchPlaylistVideos(source.url, limit);
         } else if (source.type === "video") {
           try {
             const v = await fetchVideoInfo(source.url);
@@ -92,8 +115,14 @@ export class Worker {
         }
 
         let added = 0;
+        let skippedDuration = 0;
         for (const v of videos) {
+          if (v.youtubeUrl.includes("/shorts/")) continue;
           if (v.width > 0 && v.height > 0 && v.width <= v.height) continue;
+          if (v.duration > 0 && (v.duration < minDur || v.duration > maxDur)) {
+            skippedDuration++;
+            continue;
+          }
           const row = this.db.addVideo(
             v.youtubeId,
             v.youtubeUrl,
@@ -105,20 +134,27 @@ export class Worker {
           if (row) added++;
         }
 
-        if (added > 0) {
+        if (added > 0 || skippedDuration > 0) {
           this.log.info(
-            `${source.name ?? source.url}: +${added} новых видео`
+            `${source.name ?? source.url}: +${added} новых видео` +
+            (skippedDuration > 0 ? `, ${skippedDuration} пропущено (длительность)` : "")
           );
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         this.log.error(`Ошибка источника ${source.url}: ${msg}`);
       }
+      // Pause between sources to avoid YouTube 429
+      if (sources.indexOf(source) < sources.length - 1) {
+        await Bun.sleep(5000);
+      }
     }
   }
 
-  private async processQueue(): Promise<void> {
-    const pending = this.db.getPendingVideos(config.maxVideosPerCycle);
+  private async processQueue(quota: number): Promise<void> {
+    if (quota <= 0) return;
+    const maxPerCycle = this.db.getSettingNum("max_videos_per_cycle", config.maxVideosPerCycle);
+    const pending = this.db.getPendingVideos(Math.min(maxPerCycle, quota));
     if (pending.length === 0) {
       this.log.info("Нет видео в очереди");
       return;
@@ -131,15 +167,16 @@ export class Worker {
     }
   }
 
-  private async retryFailed(): Promise<void> {
-    const retryable = this.db.getRetryableVideos(2);
+  private async retryFailed(quota: number): Promise<number> {
+    const retryable = this.db.getRetryableUploadVideos(quota);
     for (const row of retryable) {
-      this.log.info(
-        `Повторная попытка: ${row.title} (retry ${row.retries + 1})`
-      );
+      if (quota <= 0) break;
+      this.log.info(`Повторная загрузка: ${row.title} (попытка ${row.retries + 1})`);
       this.db.updateVideoStatus(row.id, "pending");
       await this.processVideo(row.id);
+      quota--;
     }
+    return quota;
   }
 
   private async processVideo(videoId: number): Promise<void> {
@@ -212,12 +249,12 @@ export class Worker {
           });
           this.log.info(`Перевод готов: ${row.title}`, row.id);
         } else {
-          this.log.warn(`Нет субтитров, загружаем оригинал: ${row.title}`, row.id);
-          dubbedPath = mp4Path;
-          this.db.updateVideoStatus(row.id, "translated", {
-            dubbed_path: dubbedPath,
-            progress: 100, speed: "без перевода", error: null,
+          this.log.warn(`Нет субтитров EN, пропускаем: ${row.title}`, row.id);
+          this.db.updateVideoStatus(row.id, "skipped", {
+            error: "Нет субтитров EN",
+            progress: null, speed: null, eta: null,
           });
+          return;
         }
       } else {
         this.log.info(`Перевод уже есть: ${row.title}`, row.id);
@@ -306,12 +343,20 @@ export class Worker {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      this.db.updateVideoStatus(row.id, "error", {
-        error: msg,
-        retries: row.retries + 1,
-        progress: null, speed: null, eta: null,
-      });
-      this.log.error(`Ошибка: ${row.title} — ${msg}`, row.id);
+      if (msg.startsWith("Vertical video skipped")) {
+        this.db.updateVideoStatus(row.id, "skipped", {
+          error: msg,
+          progress: null, speed: null, eta: null,
+        });
+        this.log.warn(`Вертикальное видео пропущено: ${row.title}`, row.id);
+      } else {
+        this.db.updateVideoStatus(row.id, "error", {
+          error: msg,
+          retries: row.retries + 1,
+          progress: null, speed: null, eta: null,
+        });
+        this.log.error(`Ошибка: ${row.title} — ${msg}`, row.id);
+      }
     } finally {
       this._currentVideoId = null;
       this._currentPhase = null;
@@ -512,6 +557,12 @@ export class Worker {
           videoId
         );
         break;
+      case "tts_skipped":
+        this.log.warn(
+          `Пропущено ${ev.count}/${ev.total} сегментов (не влезают в слот)`,
+          videoId
+        );
+        break;
       case "error":
         this.log.error(`[dub] ${ev.message}`, videoId);
         break;
@@ -523,8 +574,9 @@ export class Worker {
 
   async startDaemon(): Promise<void> {
     this.running = true;
+    const intervalMs = this.db.getSettingNum("sync_interval_ms", config.syncIntervalMs);
     this.log.info(
-      `Daemon запущен, интервал: ${config.syncIntervalMs / 1000}с`
+      `Daemon запущен, интервал: ${intervalMs / 60000} мин`
     );
 
     while (this.running) {
@@ -535,10 +587,11 @@ export class Worker {
         this.log.error(`Ошибка цикла: ${msg}`);
       }
       if (!this.running) break;
+      const sleepMs = this.db.getSettingNum("sync_interval_ms", config.syncIntervalMs);
       this.log.info(
-        `Следующий цикл через ${config.syncIntervalMs / 60000} мин`
+        `Следующий цикл через ${sleepMs / 60000} мин`
       );
-      await Bun.sleep(config.syncIntervalMs);
+      await Bun.sleep(sleepMs);
     }
   }
 

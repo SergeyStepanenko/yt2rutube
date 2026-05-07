@@ -54,8 +54,12 @@ export async function downloadVideo(
 ): Promise<DownloadResult> {
   await mkdir(downloadsDir, { recursive: true });
 
+  const cookieArgs: string[] = [];
+  const cookieFile = process.env.YT_COOKIES_FILE;
+  if (cookieFile) cookieArgs.push("--cookies", cookieFile);
+
   const metaProc = Bun.spawn(
-    ["yt-dlp", "--dump-json", "--no-download", url],
+    ["yt-dlp", ...cookieArgs, "--dump-json", "--no-download", url],
     { stdout: "pipe", stderr: "pipe" }
   );
   const [metaOut, metaErr] = await Promise.all([
@@ -75,8 +79,12 @@ export async function downloadVideo(
     .find((l) => l.length > 0);
   if (!metaLine) throw new Error("yt-dlp returned empty metadata");
 
-  const meta = JSON.parse(metaLine) as { id?: string; title?: string; description?: string };
+  const meta = JSON.parse(metaLine) as { id?: string; title?: string; description?: string; width?: number; height?: number };
   if (!meta.id) throw new Error("yt-dlp metadata missing video id");
+  if (typeof meta.width === "number" && typeof meta.height === "number" &&
+      meta.width > 0 && meta.height > 0 && meta.width <= meta.height) {
+    throw new Error(`Vertical video skipped (${meta.width}x${meta.height})`);
+  }
 
   const title = sanitizeFilename(meta.title ?? "video");
   const videoDir = path.join(downloadsDir, title);
@@ -87,6 +95,7 @@ export async function downloadVideo(
   const proc = Bun.spawn(
     [
       "yt-dlp",
+      ...cookieArgs,
       "-f", "bestvideo+bestaudio/best",
       "--merge-output-format", "mp4",
       "-o", outputTemplate,
@@ -99,6 +108,8 @@ export async function downloadVideo(
       "--sub-langs", "en",
       "--sub-format", "srt",
       "--convert-subs", "srt",
+      "--sleep-requests", "3",
+      "--ignore-errors",
       url,
     ],
     { stdout: "pipe", stderr: "pipe" }

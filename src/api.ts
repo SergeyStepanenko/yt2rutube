@@ -47,6 +47,7 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
       if (pathname === "/api/stats" && method === "GET") {
         const stats = db.getStats();
         const sources = db.getSources();
+        const settings = db.getAllSettings();
         return json({
           stats,
           sourcesCount: sources.length,
@@ -54,6 +55,7 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
           isProcessing: worker.isProcessing,
           currentVideoId: worker.currentVideoId,
           currentPhase: worker.currentPhase,
+          settings,
         });
       }
 
@@ -82,6 +84,34 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
         db.deleteSource(id);
         log.info(`Удалён источник #${id}`);
         return json({ ok: true });
+      }
+
+      if (sourceMatch && method === "PATCH") {
+        const id = Number(sourceMatch[1]);
+        const body = (await req.json()) as {
+          name?: string | null;
+          enabled?: number;
+          fetch_limit?: number;
+        };
+        db.updateSource(id, body);
+        return json({ ok: true });
+      }
+
+      // Settings
+      if (pathname === "/api/settings" && method === "GET") {
+        return json(db.getAllSettings());
+      }
+
+      if (pathname === "/api/settings" && method === "PATCH") {
+        const body = (await req.json()) as Record<string, string>;
+        const allowed = ["sync_interval_ms", "max_videos_per_cycle", "min_duration", "max_duration", "auto_discover"];
+        for (const key of allowed) {
+          if (body[key] !== undefined) {
+            db.setSetting(key, String(body[key]));
+          }
+        }
+        log.info("Настройки обновлены");
+        return json(db.getAllSettings());
       }
 
       // Videos
@@ -121,21 +151,24 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
         }
       }
 
-      // Add channel — fetch all horizontal videos
+      // Add channel — fetch all horizontal videos (no limit for initial add)
       if (pathname === "/api/channels" && method === "POST") {
-        const body = (await req.json()) as { url: string; name?: string };
+        const body = (await req.json()) as { url: string; name?: string; fetch_limit?: number };
         if (!body.url) return json({ error: "url required" }, 400);
 
-        const source = db.addSource("channel", body.url, body.name);
+        const source = db.addSource("channel", body.url, body.name, body.fetch_limit);
         log.info(`Канал добавлен: ${body.url}`);
 
-        // Async discovery — don't block the response
+        const minDur = db.getSettingNum("min_duration", 60);
+        const maxDur = db.getSettingNum("max_duration", 1800);
+
         (async () => {
           try {
             const videos = await fetchChannelVideos(body.url);
             let added = 0;
             for (const v of videos) {
               if (v.width > 0 && v.height > 0 && v.width <= v.height) continue;
+              if (v.duration > 0 && (v.duration < minDur || v.duration > maxDur)) continue;
               const row = db.addVideo(
                 v.youtubeId,
                 v.youtubeUrl,
@@ -176,6 +209,22 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
         if (body.action === "skip") {
           db.updateVideoStatus(id, "skipped");
           return json({ ok: true });
+        }
+        return json({ error: "Unknown action" }, 400);
+      }
+
+      // Bulk actions
+      if (pathname === "/api/videos/bulk" && method === "POST") {
+        const body = (await req.json()) as { action: string };
+        if (body.action === "reset_errors") {
+          const count = db.resetAllErrors();
+          log.info(`Сброшено ${count} ошибок`);
+          return json({ ok: true, count });
+        }
+        if (body.action === "skip_pending") {
+          const count = db.skipAllPending();
+          log.info(`Пропущено ${count} pending видео`);
+          return json({ ok: true, count });
         }
         return json({ error: "Unknown action" }, 400);
       }

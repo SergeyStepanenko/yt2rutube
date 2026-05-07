@@ -22,7 +22,13 @@ export interface SourceRow {
   url: string;
   name: string | null;
   enabled: number;
+  fetch_limit: number;
   created_at: string;
+}
+
+export interface SettingRow {
+  key: string;
+  value: string;
 }
 
 export interface VideoRow {
@@ -80,7 +86,13 @@ CREATE TABLE IF NOT EXISTS sources (
   url TEXT NOT NULL UNIQUE,
   name TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
+  fetch_limit INTEGER NOT NULL DEFAULT 5,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS videos (
@@ -150,6 +162,14 @@ export class DB {
     if (!names.has("dubbed_path")) {
       this.db.exec("ALTER TABLE videos ADD COLUMN dubbed_path TEXT DEFAULT NULL");
     }
+
+    const srcCols = this.db
+      .prepare("PRAGMA table_info(sources)")
+      .all() as { name: string }[];
+    const srcNames = new Set(srcCols.map((c) => c.name));
+    if (!srcNames.has("fetch_limit")) {
+      this.db.exec("ALTER TABLE sources ADD COLUMN fetch_limit INTEGER NOT NULL DEFAULT 5");
+    }
   }
 
   recoverStuckVideos(): number {
@@ -162,13 +182,14 @@ export class DB {
 
   // --- Sources ---
 
-  addSource(type: string, url: string, name?: string): SourceRow {
+  addSource(type: string, url: string, name?: string, fetchLimit?: number): SourceRow {
+    const limit = fetchLimit ?? config.defaultFetchLimit;
     const stmt = this.db.prepare(
-      `INSERT INTO sources (type, url, name) VALUES (?, ?, ?)
+      `INSERT INTO sources (type, url, name, fetch_limit) VALUES (?, ?, ?, ?)
        ON CONFLICT(url) DO UPDATE SET type=excluded.type, name=COALESCE(excluded.name, sources.name), enabled=1
        RETURNING *`
     );
-    return stmt.get(type, url, name ?? null) as SourceRow;
+    return stmt.get(type, url, name ?? null, limit) as SourceRow;
   }
 
   getSources(): SourceRow[] {
@@ -189,6 +210,47 @@ export class DB {
 
   deleteSource(id: number): void {
     this.db.prepare("DELETE FROM sources WHERE id = ?").run(id);
+  }
+
+  updateSource(
+    id: number,
+    fields: Partial<{ name: string | null; enabled: number; fetch_limit: number }>
+  ): void {
+    const sets: string[] = [];
+    const vals: (string | number | null)[] = [];
+    if (fields.name !== undefined) { sets.push("name = ?"); vals.push(fields.name); }
+    if (fields.enabled !== undefined) { sets.push("enabled = ?"); vals.push(fields.enabled); }
+    if (fields.fetch_limit !== undefined) { sets.push("fetch_limit = ?"); vals.push(fields.fetch_limit); }
+    if (sets.length === 0) return;
+    vals.push(id);
+    this.db.prepare(`UPDATE sources SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+  }
+
+  // --- Settings ---
+
+  getSetting(key: string): string | null {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | null;
+    return row?.value ?? null;
+  }
+
+  setSetting(key: string, value: string): void {
+    this.db.prepare(
+      "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).run(key, value);
+  }
+
+  getAllSettings(): Record<string, string> {
+    const rows = this.db.prepare("SELECT * FROM settings").all() as SettingRow[];
+    const result: Record<string, string> = {};
+    for (const r of rows) result[r.key] = r.value;
+    return result;
+  }
+
+  getSettingNum(key: string, fallback: number): number {
+    const v = this.getSetting(key);
+    if (v === null) return fallback;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
   }
 
   // --- Videos ---
@@ -279,7 +341,7 @@ export class DB {
   getPendingVideos(limit = 10): VideoRow[] {
     return this.db
       .prepare(
-        "SELECT * FROM videos WHERE status IN ('pending', 'downloaded', 'translated') ORDER BY id ASC LIMIT ?"
+        "SELECT * FROM videos WHERE status IN ('pending', 'downloaded', 'translated') ORDER BY id DESC LIMIT ?"
       )
       .all(limit) as VideoRow[];
   }
@@ -291,6 +353,26 @@ export class DB {
          ORDER BY updated_at ASC LIMIT ?`
       )
       .all(config.maxRetries, limit) as VideoRow[];
+  }
+
+  getRetryableUploadVideos(limit = 5): VideoRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM videos WHERE status = 'error' AND retries < ? AND dubbed_path IS NOT NULL
+         ORDER BY updated_at ASC LIMIT ?`
+      )
+      .all(config.maxRetries, limit) as VideoRow[];
+  }
+
+  getDailyUploadCount(): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM videos
+         WHERE status = 'done' AND rutube_id IS NOT NULL
+         AND updated_at >= date('now')`
+      )
+      .get() as { cnt: number };
+    return row.cnt;
   }
 
   getStats(): VideoStats {
@@ -391,6 +473,22 @@ export class DB {
       )
       .run(id);
   }
+
+  resetAllErrors(): number {
+    const r = this.db.run(
+      "UPDATE videos SET status = 'pending', error = NULL, retries = 0, updated_at = datetime('now') WHERE status = 'error'"
+    );
+    return r.changes;
+  }
+
+  skipAllPending(): number {
+    const r = this.db.run(
+      "UPDATE videos SET status = 'skipped', updated_at = datetime('now') WHERE status = 'pending'"
+    );
+    return r.changes;
+  }
+
+  
 
   // --- Logs ---
 

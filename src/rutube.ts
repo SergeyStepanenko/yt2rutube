@@ -49,6 +49,7 @@ export class RutubeClient {
   async uploadByUrl(params: UploadParams): Promise<UploadResult> {
     const body: Record<string, any> = {
       url: params.url,
+      category_id: params.categoryId ?? 2,
     };
 
     if (params.callbackUrl) {
