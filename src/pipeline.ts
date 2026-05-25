@@ -10,13 +10,13 @@ interface TransferResult {
 }
 
 /**
- * Полный пайплайн: YouTube → локальный диск → Rutube.
+ * Full pipeline: YouTube → local disk → Rutube.
  *
- * 1. Скачивает видео с YouTube через yt-dlp
- * 2. Поднимает локальный HTTP-сервер для файла
- * 3. Авторизуется в Rutube
- * 4. Отправляет ссылку на файл в Rutube API
- * 5. Останавливает сервер (опционально, после таймаута)
+ * 1. Downloads the video from YouTube via yt-dlp
+ * 2. Starts a local HTTP server for the file
+ * 3. Authenticates with Rutube
+ * 4. Sends the file URL to the Rutube API
+ * 5. Stops the server (optionally, after a timeout)
  */
 export async function transfer(
   youtubeUrl: string,
@@ -26,9 +26,9 @@ export async function transfer(
     maxHeight?: number;
     categoryId?: number;
     isHidden?: boolean;
-    /** Публичный URL, если файл уже доступен извне (напр. через ngrok) */
+    /** Public URL if the file is already accessible externally (e.g. via ngrok) */
     publicBaseUrl?: string;
-    /** Время ожидания (мс) перед остановкой сервера, чтобы Rutube успел скачать */
+    /** Wait time (ms) before stopping the server so Rutube can finish downloading */
     serveTimeout?: number;
   }
 ): Promise<TransferResult> {
@@ -41,29 +41,29 @@ export async function transfer(
     );
   }
 
-  // 1. Скачиваем видео
-  console.log(`\n[1/4] Скачиваем видео: ${youtubeUrl}`);
+  // 1. Download the video
+  console.log(`\n[1/4] Downloading video: ${youtubeUrl}`);
   const video = await downloadVideo(youtubeUrl, options?.maxHeight);
-  console.log(`      Готово: ${video.title} (${video.id})`);
+  console.log(`      Done: ${video.title} (${video.id})`);
 
-  // 2. Поднимаем файловый сервер
-  console.log(`\n[2/4] Запускаем файловый сервер...`);
+  // 2. Start the file server
+  console.log(`\n[2/4] Starting file server...`);
   const server = startFileServer();
   const filename = path.basename(video.filepath);
   const fileUrl = options?.publicBaseUrl
     ? `${options.publicBaseUrl}/${filename}`
     : `${server.url}/${filename}`;
 
-  console.log(`      Файл доступен по: ${fileUrl}`);
+  console.log(`      File available at: ${fileUrl}`);
 
   try {
-    // 3. Авторизуемся в Rutube
-    console.log(`\n[3/4] Авторизация в Rutube...`);
+    // 3. Authenticate with Rutube
+    console.log(`\n[3/4] Authenticating with Rutube...`);
     const rutube = new RutubeClient();
     await rutube.login(email, password);
 
-    // 4. Загружаем
-    console.log(`\n[4/4] Отправляем видео в Rutube...`);
+    // 4. Upload
+    console.log(`\n[4/4] Sending video to Rutube...`);
     const result = await rutube.uploadByUrl({
       url: fileUrl,
       title: video.title,
@@ -72,15 +72,15 @@ export async function transfer(
       categoryId: options?.categoryId,
     });
 
-    console.log(`\n  Видео отправлено в Rutube!`);
+    console.log(`\n  Video sent to Rutube!`);
     console.log(`  Video ID: ${result.videoId}`);
 
-    // Даём Rutube время скачать файл перед остановкой сервера
+    // Give Rutube time to download the file before stopping the server
     const timeout = options?.serveTimeout ?? 5 * 60 * 1000;
     console.log(
-      `\n  Сервер будет работать ещё ${timeout / 1000}с, чтобы Rutube скачал файл...`
+      `\n  Server will keep running for ${timeout / 1000}s so Rutube can download the file...`
     );
-    console.log(`  (Нажми Ctrl+C для досрочной остановки)\n`);
+    console.log(`  (Press Ctrl+C to stop early)\n`);
 
     await Bun.sleep(timeout);
     server.stop();

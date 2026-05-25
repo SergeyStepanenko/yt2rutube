@@ -4,9 +4,9 @@ const DOWNLOADS_DIR = path.resolve(import.meta.dir, "..", "downloads");
 const PORT = Number(process.env.SERVE_PORT) || 8333;
 
 /**
- * Rutube API загружает видео по URL —
- * этот мини-сервер отдаёт скачанные файлы по HTTP,
- * чтобы Rutube мог их забрать.
+ * Rutube API downloads video by URL —
+ * this mini-server serves downloaded files over HTTP
+ * so Rutube can fetch them.
  */
 export function startFileServer(): { url: string; stop: () => void } {
   const server = Bun.serve({
@@ -39,7 +39,7 @@ export function startFileServer(): { url: string; stop: () => void } {
   });
 
   const baseUrl = `http://localhost:${server.port}`;
-  console.log(`File server запущен: ${baseUrl}`);
+  console.log(`File server started: ${baseUrl}`);
 
   return {
     url: baseUrl,

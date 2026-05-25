@@ -51,7 +51,7 @@ export class Worker {
     }
     await this.rutube.login(email, password);
     this.loggedIn = true;
-    this.log.info("Rutube: авторизация успешна");
+    this.log.info("Rutube: authentication successful");
   }
 
   async runCycle(): Promise<void> {
@@ -65,9 +65,9 @@ export class Worker {
       const remaining = Math.max(0, dailyLimit - uploadedToday);
 
       if (remaining === 0) {
-        this.log.info(`Дневной лимит загрузок исчерпан (${uploadedToday}/${dailyLimit})`);
+        this.log.info(`Daily upload limit reached (${uploadedToday}/${dailyLimit})`);
       } else {
-        this.log.info(`Загружено сегодня: ${uploadedToday}/${dailyLimit}, осталось: ${remaining}`);
+        this.log.info(`Uploaded today: ${uploadedToday}/${dailyLimit}, remaining: ${remaining}`);
         const afterRetry = await this.retryFailed(remaining);
         await this.processQueue(afterRetry);
       }
@@ -83,7 +83,7 @@ export class Worker {
   private async discoverVideos(): Promise<void> {
     const autoDiscover = this.db.getSetting("auto_discover");
     if (autoDiscover === "0") {
-      this.log.info("Автообнаружение отключено");
+      this.log.info("Auto-discovery disabled");
       return;
     }
 
@@ -93,7 +93,7 @@ export class Worker {
     const minDur = this.db.getSettingNum("min_duration", config.minDurationSec);
     const maxDur = this.db.getSettingNum("max_duration", config.maxDurationSec);
 
-    this.log.info(`Обнаружение видео из ${sources.length} источников`);
+    this.log.info(`Discovering videos from ${sources.length} sources`);
 
     for (const source of sources) {
       try {
@@ -109,7 +109,7 @@ export class Worker {
             const v = await fetchVideoInfo(source.url);
             videos = [v];
           } catch {
-            this.log.warn(`Не удалось получить инфо: ${source.url}`);
+            this.log.warn(`Could not fetch info: ${source.url}`);
             continue;
           }
         }
@@ -136,13 +136,13 @@ export class Worker {
 
         if (added > 0 || skippedDuration > 0) {
           this.log.info(
-            `${source.name ?? source.url}: +${added} новых видео` +
-            (skippedDuration > 0 ? `, ${skippedDuration} пропущено (длительность)` : "")
+            `${source.name ?? source.url}: +${added} new videos` +
+            (skippedDuration > 0 ? `, ${skippedDuration} skipped (duration)` : "")
           );
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        this.log.error(`Ошибка источника ${source.url}: ${msg}`);
+        this.log.error(`Source error ${source.url}: ${msg}`);
       }
       // Pause between sources to avoid YouTube 429
       if (sources.indexOf(source) < sources.length - 1) {
@@ -156,11 +156,11 @@ export class Worker {
     const maxPerCycle = this.db.getSettingNum("max_videos_per_cycle", config.maxVideosPerCycle);
     const pending = this.db.getPendingVideos(Math.min(maxPerCycle, quota));
     if (pending.length === 0) {
-      this.log.info("Нет видео в очереди");
+      this.log.info("No videos in queue");
       return;
     }
 
-    this.log.info(`Обработка ${pending.length} видео`);
+    this.log.info(`Processing ${pending.length} videos`);
 
     for (const row of pending) {
       await this.processVideo(row.id);
@@ -171,7 +171,7 @@ export class Worker {
     const retryable = this.db.getRetryableUploadVideos(quota);
     for (const row of retryable) {
       if (quota <= 0) break;
-      this.log.info(`Повторная загрузка: ${row.title} (попытка ${row.retries + 1})`);
+      this.log.info(`Retrying upload: ${row.title} (attempt ${row.retries + 1})`);
       this.db.updateVideoStatus(row.id, "pending");
       await this.processVideo(row.id);
       quota--;
@@ -196,7 +196,7 @@ export class Worker {
         this.db.updateVideoStatus(row.id, "downloading", {
           progress: 0, speed: null, eta: null, error: null,
         });
-        this.log.info(`Скачиваем: ${row.title}`, row.id);
+        this.log.info(`Downloading: ${row.title}`, row.id);
 
         const dl = await downloadVideo(
           row.youtube_url,
@@ -218,11 +218,11 @@ export class Worker {
           speed: null, eta: null, error: null,
         });
         this.log.info(
-          `Скачано: ${row.title} (${(dl.fileSize / 1024 / 1024).toFixed(1)} МБ)`,
+          `Downloaded: ${row.title} (${(dl.fileSize / 1024 / 1024).toFixed(1)} MB)`,
           row.id
         );
       } else {
-        this.log.info(`Файл уже скачан: ${row.title}`, row.id);
+        this.log.info(`File already downloaded: ${row.title}`, row.id);
         downloadDir = path.dirname(mp4Path);
       }
 
@@ -235,9 +235,9 @@ export class Worker {
 
         if (srtExists) {
           this.db.updateVideoStatus(row.id, "translating", {
-            progress: 0, speed: "перевод...", error: null,
+            progress: 0, speed: "translating...", error: null,
           });
-          this.log.info(`Переводим: ${row.title}`, row.id);
+          this.log.info(`Translating: ${row.title}`, row.id);
 
           dubbedPath = await this.runDubbing(
             downloadDir!, row.title, description, row.id
@@ -247,17 +247,17 @@ export class Worker {
             dubbed_path: dubbedPath,
             progress: 100, speed: null, error: null,
           });
-          this.log.info(`Перевод готов: ${row.title}`, row.id);
+          this.log.info(`Translation done: ${row.title}`, row.id);
         } else {
-          this.log.warn(`Нет субтитров EN, пропускаем: ${row.title}`, row.id);
+          this.log.warn(`No EN subtitles, skipping: ${row.title}`, row.id);
           this.db.updateVideoStatus(row.id, "skipped", {
-            error: "Нет субтитров EN",
+            error: "No EN subtitles",
             progress: null, speed: null, eta: null,
           });
           return;
         }
       } else {
-        this.log.info(`Перевод уже есть: ${row.title}`, row.id);
+        this.log.info(`Translation already exists: ${row.title}`, row.id);
       }
 
       // ── 3. Duplicate check ─────────────────────────────────
@@ -273,11 +273,11 @@ export class Worker {
             rutube_status: "duplicate",
             progress: null, error: null, file_path: null,
           });
-          this.log.info(`Дубликат на Rutube, пропускаем: ${row.title} → ${existingUrl}`, row.id);
+          this.log.info(`Duplicate on Rutube, skipping: ${row.title} → ${existingUrl}`, row.id);
           return;
         }
       } catch (e) {
-        this.log.warn(`Не удалось проверить дубли: ${e instanceof Error ? e.message : String(e)}`, row.id);
+        this.log.warn(`Could not check for duplicates: ${e instanceof Error ? e.message : String(e)}`, row.id);
       }
 
       // ── 4. Translate metadata ────────────────────────────────
@@ -287,20 +287,20 @@ export class Worker {
       let ruTitle = row.title;
       let ruDescription = description;
       try {
-        this.log.info(`Переводим метаданные: ${row.title}`, row.id);
+        this.log.info(`Translating metadata: ${row.title}`, row.id);
         const translated = await this.translateMetadata(row.title, description);
         ruTitle = translated.title;
         ruDescription = translated.description;
-        this.log.info(`Название RU: ${ruTitle}`, row.id);
+        this.log.info(`Title RU: ${ruTitle}`, row.id);
       } catch (e) {
-        this.log.warn(`Не удалось перевести метаданные, используем оригинал: ${e instanceof Error ? e.message : String(e)}`, row.id);
+        this.log.warn(`Could not translate metadata, using original: ${e instanceof Error ? e.message : String(e)}`, row.id);
       }
 
       // ── 5. Upload ──────────────────────────────────────────
       this.db.updateVideoStatus(row.id, "uploading", {
         progress: null, speed: null, eta: null, error: null,
       });
-      this.log.info(`Загружаем на Rutube: ${ruTitle}`, row.id);
+      this.log.info(`Uploading to Rutube: ${ruTitle}`, row.id);
 
       const upload = await uploadToRutube(
         this.rutube,
@@ -327,7 +327,7 @@ export class Worker {
           rutube_status: upload.status,
           progress: null, error: null, file_path: null,
         });
-        this.log.info(`Загружено: ${row.title} → ${upload.videoUrl}`, row.id);
+        this.log.info(`Uploaded: ${row.title} → ${upload.videoUrl}`, row.id);
       } else {
         this.db.updateVideoStatus(row.id, "error", {
           rutube_id: upload.videoId,
@@ -337,7 +337,7 @@ export class Worker {
           progress: null,
         });
         this.log.error(
-          `Ошибка загрузки: ${row.title} — ${upload.status}`,
+          `Upload error: ${row.title} — ${upload.status}`,
           row.id
         );
       }
@@ -348,14 +348,14 @@ export class Worker {
           error: msg,
           progress: null, speed: null, eta: null,
         });
-        this.log.warn(`Вертикальное видео пропущено: ${row.title}`, row.id);
+        this.log.warn(`Vertical video skipped: ${row.title}`, row.id);
       } else {
         this.db.updateVideoStatus(row.id, "error", {
           error: msg,
           retries: row.retries + 1,
           progress: null, speed: null, eta: null,
         });
-        this.log.error(`Ошибка: ${row.title} — ${msg}`, row.id);
+        this.log.error(`Error: ${row.title} — ${msg}`, row.id);
       }
     } finally {
       this._currentVideoId = null;
@@ -499,12 +499,12 @@ export class Worker {
 
   private handleDubEvent(ev: DubEvent, videoId: number): void {
     const stepNames: Record<string, string> = {
-      extract_audio: "извлечение аудио",
-      demucs_separate: "разделение аудио (Demucs)",
-      punctuate: "пунктуация субтитров",
-      translate: "перевод на русский",
-      tts_synthesize: "озвучка (TTS)",
-      mix_and_encode: "сведение и кодирование",
+      extract_audio: "audio extraction",
+      demucs_separate: "audio separation (Demucs)",
+      punctuate: "subtitle punctuation",
+      translate: "translation to Russian",
+      tts_synthesize: "voice synthesis (TTS)",
+      mix_and_encode: "mixing and encoding",
     };
 
     switch (ev.event) {
@@ -514,7 +514,7 @@ export class Worker {
         this.db.updateProgress(
           videoId,
           Math.round(((step - 1) / 6) * 100),
-          `шаг ${step}/6: ${name}`,
+          `step ${step}/6: ${name}`,
           null
         );
         break;
@@ -529,37 +529,37 @@ export class Worker {
         break;
       case "flatten_done":
         this.log.info(
-          `Субтитры: ${ev.raw_entries} записей → ${ev.unique_words} уникальных слов`,
+          `Subtitles: ${ev.raw_entries} entries → ${ev.unique_words} unique words`,
           videoId
         );
         break;
       case "punctuate_batch":
         this.db.updateProgress(
           videoId, 33,
-          `пунктуация: пакет ${ev.batch}/${ev.total}`,
+          `punctuation: batch ${ev.batch}/${ev.total}`,
           null
         );
         break;
       case "translate_batch":
         this.db.updateProgress(
           videoId, 50,
-          `перевод: пакет ${ev.batch}/${ev.total}`,
+          `translation: batch ${ev.batch}/${ev.total}`,
           null
         );
         break;
       case "translate_cached":
       case "punctuate_cached":
-        this.log.info(`Кеш: ${ev.segments ?? ev.chars ?? ""}`, videoId);
+        this.log.info(`Cache: ${ev.segments ?? ev.chars ?? ""}`, videoId);
         break;
       case "tts_shortened":
         this.log.info(
-          `Перефразировано ${ev.count}/${ev.total} сегментов (были слишком длинные)`,
+          `Rephrased ${ev.count}/${ev.total} segments (were too long)`,
           videoId
         );
         break;
       case "tts_skipped":
         this.log.warn(
-          `Пропущено ${ev.count}/${ev.total} сегментов (не влезают в слот)`,
+          `Skipped ${ev.count}/${ev.total} segments (do not fit in slot)`,
           videoId
         );
         break;
@@ -567,7 +567,7 @@ export class Worker {
         this.log.error(`[dub] ${ev.message}`, videoId);
         break;
       case "done":
-        this.log.info(`[dub] Готово: ${ev.file} (${ev.size_mb} МБ)`, videoId);
+        this.log.info(`[dub] Done: ${ev.file} (${ev.size_mb} MB)`, videoId);
         break;
     }
   }
@@ -576,7 +576,7 @@ export class Worker {
     this.running = true;
     const intervalMs = this.db.getSettingNum("sync_interval_ms", config.syncIntervalMs);
     this.log.info(
-      `Daemon запущен, интервал: ${intervalMs / 60000} мин`
+      `Daemon started, interval: ${intervalMs / 60000} min`
     );
 
     while (this.running) {
@@ -584,12 +584,12 @@ export class Worker {
         await this.runCycle();
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        this.log.error(`Ошибка цикла: ${msg}`);
+        this.log.error(`Cycle error: ${msg}`);
       }
       if (!this.running) break;
       const sleepMs = this.db.getSettingNum("sync_interval_ms", config.syncIntervalMs);
       this.log.info(
-        `Следующий цикл через ${sleepMs / 60000} мин`
+        `Next cycle in ${sleepMs / 60000} min`
       );
       await Bun.sleep(sleepMs);
     }
@@ -597,6 +597,6 @@ export class Worker {
 
   stop(): void {
     this.running = false;
-    this.log.info("Daemon остановлен");
+    this.log.info("Daemon stopped");
   }
 }

@@ -22,7 +22,7 @@ interface DownloadResult {
 
 async function download(url: string): Promise<DownloadResult> {
   const ytDlp = process.env.YT_DLP_PATH || "yt-dlp";
-  console.log(`\nПолучаем метаданные: ${url}`);
+  console.log(`\nFetching metadata: ${url}`);
   const metaRaw = await $`${ytDlp} --dump-json --no-download ${url}`.text();
   const meta = JSON.parse(metaRaw);
 
@@ -30,12 +30,12 @@ async function download(url: string): Promise<DownloadResult> {
   const videoDir = path.join(DOWNLOADS_DIR, title);
   await mkdir(videoDir, { recursive: true });
 
-  console.log(`Название: ${meta.title}`);
-  console.log(`Папка: ${videoDir}`);
+  console.log(`Title: ${meta.title}`);
+  console.log(`Directory: ${videoDir}`);
 
   const outputTemplate = path.join(videoDir, `${title}.%(ext)s`);
 
-  console.log(`\nСкачиваем видео в максимальном качестве...`);
+  console.log(`\nDownloading video in best quality...`);
   const proc = Bun.spawn(
     [
       ytDlp,
@@ -62,15 +62,15 @@ async function download(url: string): Promise<DownloadResult> {
 
   const videoFile = path.join(videoDir, `${title}.mp4`);
   if (!(await Bun.file(videoFile).exists())) {
-    throw new Error(`Видеофайл не найден: ${videoFile}`);
+    throw new Error(`Video file not found: ${videoFile}`);
   }
 
   const srtFile = path.join(videoDir, `${title}.en.srt`);
   const subtitleFile = (await Bun.file(srtFile).exists()) ? srtFile : null;
 
-  console.log(`\nГотово!`);
-  console.log(`  Видео:    ${videoFile}`);
-  console.log(`  Субтитры: ${subtitleFile ?? "не найдены"}`);
+  console.log(`\nDone!`);
+  console.log(`  Video:     ${videoFile}`);
+  console.log(`  Subtitles: ${subtitleFile ?? "not found"}`);
 
   return {
     id: meta.id,
@@ -83,14 +83,14 @@ async function download(url: string): Promise<DownloadResult> {
 
 const url = process.argv[2];
 if (!url) {
-  console.error("Использование: bun run download <youtube-url>");
-  console.error("Пример:        bun run download https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  console.error("Usage:   bun run download <youtube-url>");
+  console.error("Example: bun run download https://www.youtube.com/watch?v=dQw4w9WgXcQ");
   process.exit(1);
 }
 
 try {
   await download(url);
 } catch (err) {
-  console.error("\nОшибка:", err instanceof Error ? err.message : err);
+  console.error("\nError:", err instanceof Error ? err.message : err);
   process.exit(1);
 }

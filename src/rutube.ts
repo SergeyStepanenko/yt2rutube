@@ -35,7 +35,7 @@ export class RutubeClient {
 
     const data = (await res.json()) as RutubeToken;
     this.token = data.token;
-    console.log("Rutube: авторизация успешна");
+    console.log("Rutube: authentication successful");
   }
 
   private getHeaders(): Record<string, string> {

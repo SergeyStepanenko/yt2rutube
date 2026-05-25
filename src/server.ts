@@ -11,7 +11,7 @@ const log = new Logger(db);
 
 const recovered = db.recoverStuckVideos();
 if (recovered > 0) {
-  log.info(`Восстановлено ${recovered} зависших видео (downloading/uploading → pending)`);
+  log.info(`Recovered ${recovered} stuck videos (downloading/uploading → pending)`);
 }
 
 const worker = new Worker(db, log);

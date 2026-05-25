@@ -74,7 +74,7 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
           return json({ error: "type and url required" }, 400);
         }
         const source = db.addSource(body.type, body.url, body.name);
-        log.info(`Добавлен источник: ${body.url}`);
+        log.info(`Source added: ${body.url}`);
         return json(source, 201);
       }
 
@@ -82,7 +82,7 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
       if (sourceMatch && method === "DELETE") {
         const id = Number(sourceMatch[1]);
         db.deleteSource(id);
-        log.info(`Удалён источник #${id}`);
+        log.info(`Source #${id} deleted`);
         return json({ ok: true });
       }
 
@@ -110,7 +110,7 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
             db.setSetting(key, String(body[key]));
           }
         }
-        log.info("Настройки обновлены");
+        log.info("Settings updated");
         return json(db.getAllSettings());
       }
 
@@ -143,7 +143,7 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
           if (!row) {
             return json({ error: "Video already exists" }, 409);
           }
-          log.info(`Видео добавлено вручную: ${info.title}`);
+          log.info(`Video added manually: ${info.title}`);
           return json(row, 201);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -157,7 +157,7 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
         if (!body.url) return json({ error: "url required" }, 400);
 
         const source = db.addSource("channel", body.url, body.name, body.fetch_limit);
-        log.info(`Канал добавлен: ${body.url}`);
+        log.info(`Channel added: ${body.url}`);
 
         const minDur = db.getSettingNum("min_duration", 60);
         const maxDur = db.getSettingNum("max_duration", 1800);
@@ -180,11 +180,11 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
               if (row) added++;
             }
             log.info(
-              `Канал ${body.name ?? body.url}: найдено ${videos.length} видео, добавлено ${added}`
+              `Channel ${body.name ?? body.url}: found ${videos.length} videos, added ${added}`
             );
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            log.error(`Ошибка загрузки канала ${body.url}: ${msg}`);
+            log.error(`Error fetching channel ${body.url}: ${msg}`);
           }
         })();
 
@@ -203,7 +203,7 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
         const body = (await req.json()) as { action: string };
         if (body.action === "reset") {
           db.resetVideo(id);
-          log.info(`Видео #${id} сброшено в pending`);
+          log.info(`Video #${id} reset to pending`);
           return json({ ok: true });
         }
         if (body.action === "skip") {
@@ -218,12 +218,12 @@ export function createApiServer(db: DB, log: Logger, worker: Worker) {
         const body = (await req.json()) as { action: string };
         if (body.action === "reset_errors") {
           const count = db.resetAllErrors();
-          log.info(`Сброшено ${count} ошибок`);
+          log.info(`Reset ${count} errors`);
           return json({ ok: true, count });
         }
         if (body.action === "skip_pending") {
           const count = db.skipAllPending();
-          log.info(`Пропущено ${count} pending видео`);
+          log.info(`Skipped ${count} pending videos`);
           return json({ ok: true, count });
         }
         return json({ error: "Unknown action" }, 400);

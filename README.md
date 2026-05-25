@@ -1,60 +1,64 @@
 # yt2rutube
 
-Скачивает видео с YouTube и загружает на Rutube через API.
+Downloads videos from YouTube and uploads them to Rutube via API.
 
-## Требования
+## Problem
+
+Rutube is a Russian video platform that does not have an official import tool from YouTube. This project automates the full pipeline: download from YouTube, serve the file over HTTP, and push it to Rutube so their backend pulls and ingests it.
+
+## Requirements
 
 - [Bun](https://bun.sh/) >= 1.0
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) (в PATH)
-- [FFmpeg](https://ffmpeg.org/) (в PATH)
-- Аккаунт на Rutube
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) (in PATH)
+- [FFmpeg](https://ffmpeg.org/) (in PATH)
+- A Rutube account
 
-## Установка
+## Setup
 
 ```bash
 bun install
 cp .env.example .env
-# Заполни .env своими данными Rutube
+# Fill in .env with your Rutube credentials
 ```
 
-## Использование
+## Usage
 
 ```bash
 bun run index.ts <youtube-url>
 ```
 
-Пример:
+Example:
 
 ```bash
 bun run index.ts "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 ```
 
-## Как это работает
+## How it works
 
-1. `yt-dlp` скачивает видео с YouTube в `downloads/`
-2. Поднимается локальный HTTP-сервер (порт 8333), отдающий файл
-3. Скрипт авторизуется в Rutube API по email/password
-4. Отправляет URL файла в Rutube — платформа сама скачивает видео
-5. Сервер работает 5 минут, чтобы Rutube успел забрать файл
+1. `yt-dlp` downloads the video from YouTube into `downloads/`
+2. A local HTTP server (port 8333) serves the file
+3. The script authenticates with the Rutube API using email/password
+4. Sends the file URL to Rutube — their platform fetches the video itself
+5. The server stays up for 5 minutes to give Rutube time to pull the file
 
-## Важно: доступность файлового сервера
+## Important: public file server
 
-Rutube API скачивает видео по URL. Локальный `localhost:8333` доступен только с вашей машины.
+The Rutube API downloads the video by URL. A local `localhost:8333` is only reachable from your machine.
 
-Для работы нужен **публичный URL**. Варианты:
+You need a **public URL**. Options:
 
-- **ngrok**: `ngrok http 8333`, затем указать URL в `PUBLIC_BASE_URL` в `.env`
-- **VPS/сервер**: запустить проект на сервере с публичным IP
-- **Cloudflare Tunnel**: аналог ngrok
+- **ngrok**: `ngrok http 8333`, then set `PUBLIC_BASE_URL` in `.env`
+- **VPS/server**: run the project on a server with a public IP
+- **Cloudflare Tunnel**: drop-in ngrok alternative
 
-## Структура
+## Structure
 
 ```
 src/
-  youtube.ts   — скачивание видео через yt-dlp
-  rutube.ts    — клиент Rutube API (авторизация, загрузка)
-  serve.ts     — мини-сервер для отдачи файлов
-  pipeline.ts  — оркестратор: скачать → отдать → загрузить
-index.ts       — точка входа (CLI)
-downloads/     — скачанные файлы
+  youtube.ts   — video download via yt-dlp
+  rutube.ts    — Rutube API client (auth, upload)
+  serve.ts     — minimal file HTTP server
+  pipeline.ts  — orchestrator: download → serve → upload
+index.ts       — CLI entry point
+downloads/     — downloaded files
 ```
