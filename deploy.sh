@@ -1,13 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-VPS_USER="root"
-VPS_HOST="80.71.152.129"
-VPS_PATH="/root/yt2rutube"
+VPS_USER="${VPS_USER:-root}"
+VPS_HOST="${VPS_HOST:?VPS_HOST not set}"
+VPS_PATH="${VPS_PATH:-/root/yt2rutube}"
 
-MACBOOK_USER="ssassistant"
-MACBOOK_HOST="192.168.1.38"
-MACBOOK_PATH="/Users/ssassistant/work/yt2rutube"
+MACBOOK_USER="${MACBOOK_USER:?MACBOOK_USER not set}"
+MACBOOK_HOST="${MACBOOK_HOST:?MACBOOK_HOST not set}"
+MACBOOK_PATH="${MACBOOK_PATH:-/Users/${MACBOOK_USER}/work/yt2rutube}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

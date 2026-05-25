@@ -59,6 +59,11 @@ test_dub/
 # python venv
 .venv/
 
+# local dev docs (may contain real infra details)
+CLAUDE.md
+.claude/
+.cursor/
+
 # channel assets (binary images)
 channel-assets/
 __pycache__/
